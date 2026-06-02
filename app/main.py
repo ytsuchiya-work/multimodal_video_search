@@ -298,8 +298,8 @@ async def get_thumbnail(segment_id: str):
         raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
-NOTEBOOK_PATH = "/Workspace/Shared/video-search-cosmos/_text_embed_notebook"
-MULTIMODAL_EMBED_NOTEBOOK = "/Workspace/Shared/video-search-cosmos/_multimodal_embed_notebook"
+NOTEBOOK_PATH = "/Workspace/Users/yusuke.tsuchiya@databricks.com/video-search-cosmos/_text_embed_notebook"
+MULTIMODAL_EMBED_NOTEBOOK = "/Workspace/Users/yusuke.tsuchiya@databricks.com/video-search-cosmos/_multimodal_embed_notebook"
 
 MM_TEXT_INDEX = f"{CATALOG}.{SCHEMA}.multimodal_text_index"
 MM_IMAGE_INDEX = f"{CATALOG}.{SCHEMA}.multimodal_image_index"
