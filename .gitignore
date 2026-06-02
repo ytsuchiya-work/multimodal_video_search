@@ -221,3 +221,6 @@ __marimo__/
 app/frontend/node_modules/
 app/frontend/dist/
 app/frontend/package-lock.json
+
+# Video files (large binaries, stored in UC Volume)
+video_files/
