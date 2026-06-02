@@ -59,8 +59,14 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(THUMBNAIL_DIR, exist_ok=True)
 
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
-spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.thumbnails")
+try:
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+except Exception as e:
+    print(f"Schema already exists or error: {e}")
+try:
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.thumbnails")
+except Exception as e:
+    print(f"Volume already exists or error: {e}")
 
 # COMMAND ----------
 
@@ -271,5 +277,29 @@ display(spark.table(TABLE_NAME).select(
 
 # COMMAND ----------
 
-print(f"テーブル行数: {spark.table(TABLE_NAME).count()}")
-print("PIPELINE COMPLETE")
+row_count = spark.table(TABLE_NAME).count()
+print(f"テーブル行数: {row_count}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 検証
+
+# COMMAND ----------
+
+print(f"=== 検証結果 ===")
+print(f"テーブル行数: {row_count}")
+assert row_count > 0, f"ERROR: {TABLE_NAME} にデータが存在しません"
+
+sample = spark.table(TABLE_NAME).select("segment_id", "text_embedding", "image_embedding").limit(1).collect()
+row = sample[0]
+text_emb = row["text_embedding"]
+img_emb = row["image_embedding"]
+assert text_emb is not None and len(text_emb) == 1024, f"ERROR: text_embedding次元が不正: {len(text_emb) if text_emb else 'None'}"
+assert img_emb is not None and len(img_emb) == 512, f"ERROR: image_embedding次元が不正: {len(img_emb) if img_emb else 'None'}"
+
+videos_with_data = spark.table(TABLE_NAME).select("video_id").distinct().count()
+print(f"処理済み動画数: {videos_with_data}")
+print(f"text_embedding次元: {len(text_emb)}")
+print(f"image_embedding次元: {len(img_emb)}")
+print("NOTEBOOK 04 VERIFIED OK")

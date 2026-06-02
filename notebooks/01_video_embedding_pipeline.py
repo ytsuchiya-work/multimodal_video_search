@@ -64,9 +64,14 @@ print(f"Volume: {VOLUME_PATH}")
 
 # COMMAND ----------
 
-spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
-spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.thumbnails")
+try:
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+except Exception as e:
+    print(f"Schema already exists or error: {e}")
+try:
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.thumbnails")
+except Exception as e:
+    print(f"Volume already exists or error: {e}")
 
 # COMMAND ----------
 
@@ -297,3 +302,26 @@ print(f"サムネイルコピー完了: {len(all_segments)} 件")
 # COMMAND ----------
 
 display(spark.table(TABLE_NAME).select("video_id", "segment_id", "title", "start_time", "end_time", "youtube_url").limit(20))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 検証
+
+# COMMAND ----------
+
+row_count = spark.table(TABLE_NAME).count()
+print(f"=== 検証結果 ===")
+print(f"テーブル行数: {row_count}")
+assert row_count > 0, f"ERROR: {TABLE_NAME} にデータが存在しません"
+
+import pyspark.sql.functions as F2
+sample = spark.table(TABLE_NAME).select("segment_id", "embedding").limit(1).collect()
+emb = sample[0]["embedding"]
+assert emb is not None and len(emb) == 768, f"ERROR: embedding次元が不正: {len(emb) if emb else 'None'}"
+assert any(v != 0.0 for v in emb), "ERROR: embeddingが全てゼロです"
+
+videos_with_data = spark.table(TABLE_NAME).select("video_id").distinct().count()
+print(f"処理済み動画数: {videos_with_data}")
+print(f"embedding次元: {len(emb)}")
+print("NOTEBOOK 01 VERIFIED OK")

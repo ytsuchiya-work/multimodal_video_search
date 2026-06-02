@@ -3,6 +3,10 @@
 # MAGIC # Vector Search 設定
 # MAGIC
 # MAGIC Delta TableのembeddingカラムにVector Search Indexを作成する。
+# MAGIC 作成するIndex:
+# MAGIC - `video_embeddings_index` (Cosmos 768次元, video_embeddings テーブル)
+# MAGIC - `multimodal_text_index` (multilingual-e5-large 1024次元, multimodal_segments テーブル)
+# MAGIC - `multimodal_image_index` (CLIP 512次元, multimodal_segments テーブル)
 
 # COMMAND ----------
 
@@ -24,23 +28,40 @@ base_url = f"https://{host}/api/2.0/vector-search"
 
 CATALOG = spark.conf.get("bundle.variable.catalog", "classic_stable_ytcy_catalog")
 SCHEMA = "multimodal_video_search"
-TABLE_NAME = f"{CATALOG}.{SCHEMA}.video_embeddings"
 
 VS_ENDPOINT_NAME = "video-search-endpoint"
-VS_INDEX_NAME = f"{CATALOG}.{SCHEMA}.video_embeddings_index"
 
-EMBEDDING_DIMENSION = 768
-EMBEDDING_COLUMN = "embedding"
-PRIMARY_KEY = "segment_id"
+VIDEO_TABLE = f"{CATALOG}.{SCHEMA}.video_embeddings"
+MM_TABLE = f"{CATALOG}.{SCHEMA}.multimodal_segments"
+
+VS_INDEX_NAME = f"{CATALOG}.{SCHEMA}.video_embeddings_index"
+MM_TEXT_INDEX = f"{CATALOG}.{SCHEMA}.multimodal_text_index"
+MM_IMAGE_INDEX = f"{CATALOG}.{SCHEMA}.multimodal_image_index"
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Vector Search Endpoint 作成
+# MAGIC ## ソーステーブルのデータ確認
 
 # COMMAND ----------
 
-# 既存Endpoint確認
+video_count = spark.table(VIDEO_TABLE).count()
+mm_count = spark.table(MM_TABLE).count()
+print(f"=== ソーステーブル確認 ===")
+print(f"video_embeddings: {video_count} 行")
+print(f"multimodal_segments: {mm_count} 行")
+
+assert video_count > 0, f"ERROR: {VIDEO_TABLE} にデータがありません。01_video_embedding_pipeline を先に実行してください。"
+assert mm_count > 0, f"ERROR: {MM_TABLE} にデータがありません。04_multimodal_pipeline を先に実行してください。"
+print("ソーステーブル確認 OK")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Vector Search Endpoint 確認
+
+# COMMAND ----------
+
 resp = requests.get(f"{base_url}/endpoints", headers=headers)
 existing_endpoints = [ep["name"] for ep in resp.json().get("endpoints", [])]
 
@@ -55,7 +76,6 @@ if VS_ENDPOINT_NAME not in existing_endpoints:
 else:
     print(f"Endpoint既存: {VS_ENDPOINT_NAME}")
 
-# Endpointがオンラインになるまで待機
 for i in range(60):
     resp = requests.get(f"{base_url}/endpoints/{VS_ENDPOINT_NAME}", headers=headers)
     ep_data = resp.json()
@@ -66,101 +86,135 @@ for i in range(60):
     print(f"  待機中... ({i+1}/60) - 状態: {state}")
     time.sleep(10)
 else:
-    print("WARNING: Endpointがタイムアウトしました。後で確認してください。")
+    raise Exception("ERROR: Endpointがタイムアウトしました")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Delta Sync Index 作成
+# MAGIC ## Index作成ヘルパー
 
 # COMMAND ----------
 
-# 既存Index確認
-resp = requests.get(
-    f"{base_url}/indexes",
-    headers=headers,
-    params={"endpoint_name": VS_ENDPOINT_NAME},
-)
-existing_indexes = [idx.get("name", "") for idx in resp.json().get("vector_indexes", [])]
-
-if VS_INDEX_NAME not in existing_indexes:
-    print(f"Index作成中: {VS_INDEX_NAME}")
-    create_body = {
-        "name": VS_INDEX_NAME,
-        "endpoint_name": VS_ENDPOINT_NAME,
-        "primary_key": PRIMARY_KEY,
-        "index_type": "DELTA_SYNC",
-        "delta_sync_index_spec": {
-            "source_table": TABLE_NAME,
-            "pipeline_type": "TRIGGERED",
-            "embedding_vector_columns": [
-                {
-                    "name": EMBEDDING_COLUMN,
-                    "embedding_dimension": EMBEDDING_DIMENSION,
-                }
-            ],
-            "columns_to_sync": [
-                "video_id", "segment_id", "title", "channel_name",
-                "youtube_url", "start_time", "end_time", "thumbnail_path",
-                "embedding"
-            ],
-        },
-    }
-    resp = requests.post(
+def create_or_sync_index(index_name, source_table, embedding_col, embedding_dim, columns_to_sync):
+    resp = requests.get(
         f"{base_url}/indexes",
         headers=headers,
-        json=create_body,
+        params={"endpoint_name": VS_ENDPOINT_NAME},
     )
-    print(f"Response: {resp.status_code} - {resp.text[:300]}")
-else:
-    print(f"Index既存: {VS_INDEX_NAME}")
+    existing_indexes = [idx.get("name", "") for idx in resp.json().get("vector_indexes", [])]
 
-# COMMAND ----------
+    if index_name not in existing_indexes:
+        print(f"Index作成中: {index_name}")
+        create_body = {
+            "name": index_name,
+            "endpoint_name": VS_ENDPOINT_NAME,
+            "primary_key": "segment_id",
+            "index_type": "DELTA_SYNC",
+            "delta_sync_index_spec": {
+                "source_table": source_table,
+                "pipeline_type": "TRIGGERED",
+                "embedding_vector_columns": [
+                    {"name": embedding_col, "embedding_dimension": embedding_dim}
+                ],
+                "columns_to_sync": columns_to_sync,
+            },
+        }
+        resp = requests.post(f"{base_url}/indexes", headers=headers, json=create_body)
+        print(f"  作成レスポンス: {resp.status_code} - {resp.text[:200]}")
+    else:
+        print(f"Index既存、同期トリガー: {index_name}")
+        resp = requests.post(
+            f"{base_url}/indexes/{index_name}/sync",
+            headers=headers,
+        )
+        print(f"  同期レスポンス: {resp.status_code} - {resp.text[:100]}")
 
-# MAGIC %md
-# MAGIC ## Index同期状態の確認
-
-# COMMAND ----------
-
-for i in range(60):
-    try:
-        resp = requests.get(f"{base_url}/indexes/{VS_INDEX_NAME}", headers=headers)
+    # 同期完了まで待機
+    for i in range(120):
+        resp = requests.get(f"{base_url}/indexes/{index_name}", headers=headers)
         idx_data = resp.json()
         status = idx_data.get("status", {})
         ready = status.get("ready", False)
+        indexed_count = status.get("indexed_row_count", 0)
         if ready:
-            print(f"Index READY: {VS_INDEX_NAME}")
-            break
-        msg = status.get("message", "syncing...")
-        print(f"  同期中... ({i+1}/60) - {msg}")
-    except Exception as e:
-        print(f"  確認中... ({i+1}/60) - {str(e)[:80]}")
-    time.sleep(10)
-else:
-    print("WARNING: Index同期がタイムアウトしました。後で確認してください。")
+            print(f"  Index READY: {index_name} ({indexed_count} rows indexed)")
+            return indexed_count
+        msg = status.get("message", "syncing...")[:80]
+        print(f"  同期中... ({i+1}/120) - {msg} | indexed: {indexed_count}")
+        time.sleep(10)
+    raise Exception(f"ERROR: {index_name} 同期タイムアウト")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## テスト検索
+# MAGIC ## 1. video_embeddings_index 作成・同期
+
+# COMMAND ----------
+
+video_cols = ["video_id", "segment_id", "title", "channel_name",
+              "youtube_url", "start_time", "end_time", "thumbnail_path", "embedding"]
+video_indexed = create_or_sync_index(
+    VS_INDEX_NAME, VIDEO_TABLE, "embedding", 768, video_cols
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2. multimodal_text_index 作成・同期
+
+# COMMAND ----------
+
+mm_cols = ["video_id", "segment_id", "title", "youtube_url",
+           "start_time", "end_time", "transcript", "thumbnail_path",
+           "text_embedding", "image_embedding"]
+text_indexed = create_or_sync_index(
+    MM_TEXT_INDEX, MM_TABLE, "text_embedding", 1024, mm_cols
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. multimodal_image_index 作成・同期
+
+# COMMAND ----------
+
+image_indexed = create_or_sync_index(
+    MM_IMAGE_INDEX, MM_TABLE, "image_embedding", 512, mm_cols
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 検証
 
 # COMMAND ----------
 
 import numpy as np
 
-test_vector = np.random.randn(EMBEDDING_DIMENSION).tolist()
+print(f"=== Vector Search Index 検証 ===")
+print(f"video_embeddings_index: {video_indexed} rows indexed")
+print(f"multimodal_text_index:  {text_indexed} rows indexed")
+print(f"multimodal_image_index: {image_indexed} rows indexed")
 
-resp = requests.post(
-    f"{base_url}/indexes/{VS_INDEX_NAME}/query",
-    headers=headers,
-    json={
-        "columns": ["segment_id", "title", "youtube_url", "start_time", "end_time"],
-        "query_vector": test_vector,
-        "num_results": 5,
-    },
-)
+assert video_indexed > 0, f"ERROR: video_embeddings_index にデータが同期されていません"
+assert text_indexed > 0, f"ERROR: multimodal_text_index にデータが同期されていません"
+assert image_indexed > 0, f"ERROR: multimodal_image_index にデータが同期されていません"
 
-print("テスト検索結果:")
-result = resp.json()
-for row in result.get("result", {}).get("data_array", []):
-    print(f"  {row}")
+# テスト検索
+for index_name, dim in [(VS_INDEX_NAME, 768), (MM_TEXT_INDEX, 1024), (MM_IMAGE_INDEX, 512)]:
+    test_vector = np.random.randn(dim).tolist()
+    resp = requests.post(
+        f"{base_url}/indexes/{index_name}/query",
+        headers=headers,
+        json={
+            "columns": ["segment_id", "title", "start_time"],
+            "query_vector": test_vector,
+            "num_results": 3,
+        },
+    )
+    result = resp.json()
+    rows = result.get("result", {}).get("data_array", [])
+    print(f"  {index_name.split('.')[-1]}: テスト検索 {resp.status_code}, {len(rows)} 件ヒット")
+    assert resp.status_code == 200, f"ERROR: {index_name} テスト検索失敗: {resp.status_code} {resp.text[:200]}"
+
+print("NOTEBOOK 02 VERIFIED OK")
