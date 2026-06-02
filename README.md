@@ -282,6 +282,196 @@ resources:
       permission: CAN_USE
 ```
 
+## デプロイ時のトラブルシューティング記録
+
+このプロジェクトを実際にデプロイする過程で遭遇した問題とその解決策をまとめる。同じ環境で再デプロイする際の参考にしてほしい。
+
+---
+
+### 問題 1: クラウド環境で YouTube 動画をダウンロードできない
+
+**現象**  
+Databricks クラスタ上で yt-dlp を実行すると、全ての YouTube 動画ダウンロードが失敗する。
+
+```
+ERROR: Sign in to confirm you're not a bot. This helps protect our community.
+```
+
+**原因**  
+YouTube がクラウド IP (AWS など) からのアクセスをボットとして検出してブロックする。Databricks クラスタは AWS 上で動作するため、yt-dlp でのダウンロードが一切できない。
+
+**解決策**  
+ローカル PC で動画をダウンロードし、Databricks CLI で UC Volume に手動アップロードする。
+
+```bash
+# ローカルでダウンロード
+yt-dlp -f "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]" \
+  --merge-output-format mp4 -o "%(id)s.mp4" <YouTube_URL>
+
+# UC Volume にアップロード
+databricks --profile <profile> fs cp ./TLpGLZkas70.mp4 \
+  dbfs:/Volumes/classic_stable_ytcy_catalog/multimodal_video_search/videos/TLpGLZkas70.mp4
+```
+
+---
+
+### 問題 2: パイプラインジョブが `CREATE CATALOG` で失敗する
+
+**現象**  
+`01_video_embedding_pipeline.py` ノートブックが以下のエラーで失敗する。
+
+```
+AnalysisException: [INVALID_STATE] Metastore storage root URL does not exist.
+```
+
+エラー箇所: `spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")`
+
+**原因**  
+`IF NOT EXISTS` を付けていても、対象カタログがすでに存在する場合に Databricks のメタストアがストレージルート URL の検証を試みてエラーになることがある。カタログの初期作成時に設定されたストレージロケーションが期待通りでない場合に発生する。
+
+**解決策**  
+カタログの DDL 文を削除する（カタログは事前に UI から作成しておく）。スキーマ・Volume の DDL は `try/except` でラップして既存リソースへの冪等アクセスを保証する。
+
+```python
+# 変更前
+spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.thumbnails")
+
+# 変更後: CREATE CATALOG を削除、残りは try/except でラップ
+try:
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+except Exception as e:
+    print(f"Schema already exists or error: {e}")
+try:
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.thumbnails")
+except Exception as e:
+    print(f"Volume already exists or error: {e}")
+```
+
+---
+
+### 問題 3: クラスタの `data_security_mode` と Unity Catalog アクセスの両立
+
+**現象と経緯**  
+クラスタの `data_security_mode` をめぐって複数の問題が連鎖的に発生した。
+
+**① SINGLE_USER (作成者のみ) → SP がアタッチできない**  
+クラスタ作成時のデフォルト設定 `SINGLE_USER` ではクラスタ所有者（`yusuke.tsuchiya@databricks.com`）しかジョブを実行できない。アプリの SP がジョブを投入しようとすると以下のエラーが発生する。
+
+```
+PERMISSION_DENIED: Single-user check failed: user '269e8acf-...' attempted to run
+a command on single-user cluster, but the single user is 'yusuke.tsuchiya@databricks.com'
+```
+
+**② NONE (制限なし) → UC Volume にアクセスできない**  
+`data_security_mode: NONE` に変更すると SP はクラスタにアタッチできるが、Unity Catalog の FUSE マウント (`/Volumes/...`) が機能しなくなる。`os.path.exists("/Volumes/...")` が常に `False` を返し、動画ファイルが見つからない。
+
+**③ USER_ISOLATION (共有) → GPU ML ランタイムが非対応**  
+複数ユーザーが使え UC にも対応する `USER_ISOLATION` モードを試みると以下のエラーが発生する。
+
+```
+INVALID_PARAMETER_VALUE: Spark version 15.4.x-gpu-ml-scala2.12 does not support Table Access Control
+```
+
+GPU ML ランタイムは Table ACL (USER_ISOLATION の前提) に非対応。
+
+**解決策**  
+クラスタの `existing_cluster_id` を直接指定する代わりに、ジョブに **job_cluster** (ジョブ実行時に自動作成されるクラスタ) を定義する。`data_security_mode: SINGLE_USER` のまま `single_user_name` を未指定にすると、ジョブ実行者のアイデンティティがシングルユーザーとして自動設定される。これにより:
+
+- 人間ユーザーがジョブを手動実行 → その人のクラスタとして UC Volume にアクセス可
+- SP がジョブを実行 → SP のクラスタとして UC Volume にアクセス可
+
+```json
+// ジョブ定義 (jobs reset API)
+{
+  "job_clusters": [{
+    "job_cluster_key": "gpu_cluster",
+    "new_cluster": {
+      "spark_version": "15.4.x-gpu-ml-scala2.12",
+      "node_type_id": "g4dn.xlarge",
+      "num_workers": 0,
+      "data_security_mode": "SINGLE_USER"
+    }
+  }],
+  "tasks": [{
+    "job_cluster_key": "gpu_cluster",
+    ...
+  }]
+}
+```
+
+> **注意**: job_cluster はジョブ実行ごとに新規作成されるため、起動に 10〜15 分かかる。長期運用では既存クラスタを SP 専用の `SINGLE_USER` で作成し、`single_user_name` に SP の application_id を指定する方法も有効。
+
+---
+
+### 問題 4: Vector Search クエリで 403 Forbidden が発生する
+
+**現象**  
+アプリが Vector Search インデックスをクエリすると 403 エラーが発生する。
+
+```
+403 Client Error: Forbidden for url:
+https://.../api/2.0/vector-search/indexes/.../video_embeddings_index/query
+```
+
+人間ユーザーのトークンでは同じクエリが 200 で成功する。
+
+**原因と解決策（複数の要因が重なっていた）**
+
+| 原因 | 確認方法 | 対処 |
+|-----|---------|------|
+| VS エンドポイントへの `CAN_USE` 権限がない | `GET /api/2.0/permissions/vector-search-endpoints/<id>` で SP の権限を確認 | `PATCH /api/2.0/permissions/vector-search-endpoints/<id>` で SP に `CAN_USE` を付与 |
+| Unity Catalog の `USE CATALOG` 権限がない | `SHOW GRANTS ON CATALOG <name>` で確認 | `GRANT USE CATALOG ON CATALOG ... TO \`<sp_id>\`` を実行 |
+| Unity Catalog の `USE SCHEMA` 権限がない | `SHOW GRANTS ON SCHEMA <name>` で確認 | `GRANT USE SCHEMA ON SCHEMA ... TO \`<sp_id>\`` を実行 |
+| Delta Table への `SELECT` 権限がない (`video_embeddings`) | `SHOW GRANTS ON TABLE <name>` で確認 | `GRANT SELECT ON TABLE ... TO \`<sp_id>\`` を実行 |
+| Delta Table への `SELECT` 権限がない (`multimodal_segments`) | 同上 | 同上 (初期設定で `video_embeddings` のみ付与していた) |
+
+> **ポイント**: `app.yaml` の `resources` セクションで VS エンドポイントを宣言しても、SP への `CAN_USE` は自動付与されない。デプロイ後に手動で付与する必要がある。
+
+---
+
+### 問題 5: `02_setup_vector_search.py` が `multimodal_text_index` / `multimodal_image_index` を作成しない
+
+**現象**  
+Vector Search インデックスが `video_embeddings_index` のみ作成され、マルチモーダル検索で使用する `multimodal_text_index` と `multimodal_image_index` が存在しない。アプリのマルチモーダル検索で 404 エラーが発生する。
+
+**原因**  
+`02_setup_vector_search.py` の初期実装が `video_embeddings_index` のみを対象としており、`multimodal_segments` テーブルに対するインデックスが未実装だった。
+
+**解決策**  
+ノートブックに3つのインデックスすべての作成ロジックを追加し、各インデックスのソーステーブル行数確認・作成/同期・テスト検索による検証を行うように改修した。
+
+| インデックス名 | ソーステーブル | 次元 | 用途 |
+|-------------|------------|-----|-----|
+| `video_embeddings_index` | `video_embeddings` | 768 | Cosmos 動画検索 |
+| `multimodal_text_index` | `multimodal_segments` | 1024 | 音声文字起こし全文検索 |
+| `multimodal_image_index` | `multimodal_segments` | 512 | 画像フレーム類似検索 |
+
+---
+
+### 問題 6: ノートブック実行結果の確認手段がなく問題の特定が困難
+
+**現象**  
+パイプラインジョブが途中で失敗しても、どのステップで何が起きたか把握しにくかった。特に Delta Table に実際にデータが書き込まれているかどうかが確認できなかった。
+
+**解決策**  
+各ノートブックの末尾に検証セルを追加した。処理結果が期待通りでない場合に早期に `AssertionError` を発生させて問題箇所を明示する。
+
+```python
+# 01_video_embedding_pipeline.py の検証例
+row_count = spark.table(TABLE_NAME).count()
+assert row_count > 0, f"ERROR: {TABLE_NAME} にデータが存在しません"
+
+sample = spark.table(TABLE_NAME).select("segment_id", "embedding").limit(1).collect()
+emb = sample[0]["embedding"]
+assert len(emb) == 768, f"ERROR: embedding次元が不正: {len(emb)}"
+assert any(v != 0.0 for v in emb), "ERROR: embeddingが全てゼロです"
+print("NOTEBOOK 01 VERIFIED OK")
+```
+
+---
+
 ## 制限事項・注意点
 
 - テキスト embedding 計算は GPU クラスタを使用するため、クラスタが停止している場合は検索に失敗する (アプリ上でクラスタ起動ボタンあり)
@@ -372,26 +562,18 @@ databricks --profile fe-vm-classic-stable-ytcy api patch \
 
 ### 4. GPU クラスタの data_security_mode
 
-GPU クラスタを `SINGLE_USER` モードで作成すると、作成者のみが実行できる制約がかかる。SP が Jobs Run Submit でジョブを投入できるよう、クラスタは `NONE`（アイソレーションなし）モードで作成・設定する。
+`SINGLE_USER` / `USER_ISOLATION` / `NONE` はそれぞれ制約があり、SP・Unity Catalog・GPU ML ランタイムの3つを同時に満たすには工夫が必要（詳細は「トラブルシューティング記録 問題 3」参照）。
+
+推奨: **パイプライン実行にはジョブ定義の `job_cluster` を使用する。** `data_security_mode: SINGLE_USER` のまま `single_user_name` を指定しないと、実行者のアイデンティティが自動設定されるため UC Volume アクセスと多ユーザー実行が両立できる。
+
+アプリからリアルタイムに呼び出す既存クラスタ (`0602-041404-xp8crh90`) は SP 専用として `SINGLE_USER` + `single_user_name: <sp_application_id>` で設定する。
 
 ```bash
-# クラスタ作成時に data_security_mode: "NONE" を指定
-databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/clusters/create" --json '{
-  "cluster_name": "video-search-gpu",
-  "spark_version": "15.4.x-gpu-ml-scala2.12",
-  "node_type_id": "g4dn.xlarge",
-  "num_workers": 0,
-  "data_security_mode": "NONE",
-  "spark_conf": {"spark.databricks.cluster.profile": "singleNode", "spark.master": "local[*]"},
-  "custom_tags": {"ResourceClass": "SingleNode"},
-  "autotermination_minutes": 60
-}'
-
-# 既存クラスタを変更する場合
+# 既存クラスタを SP 専用 SINGLE_USER に変更する場合
 databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/clusters/edit" --json '{
   "cluster_id": "<cluster_id>",
-  ...,
-  "data_security_mode": "NONE"
+  "data_security_mode": "SINGLE_USER",
+  "single_user_name": "<app_sp_application_id>"
 }'
 ```
 
@@ -402,5 +584,7 @@ databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/clusters/edit"
 | `Unable to access the notebook ... lacks the required permissions` | ノートブックディレクトリへの権限なし | 手順 1 を実施 |
 | `403 Forbidden for url: .../vector-search/indexes/.../query` | SP が Vector Search エンドポイントの CAN_USE 権限なし、または Unity Catalog (USE CATALOG / USE SCHEMA / SELECT) 権限なし | 手順 2 を実施 |
 | `job run-as ... lacks 'Attach' permissions on the underlying cluster` | GPU クラスタへの Attach 権限なし | 手順 3 を実施 |
-| `Single-user check failed: user '...' attempted to run a command on single-user cluster` | クラスタが SINGLE_USER モードで作成されており SP が実行不可 | 手順 4 を実施: クラスタを `data_security_mode: NONE` に変更 |
+| `Single-user check failed: user '...' attempted to run a command on single-user cluster` | クラスタが SINGLE_USER モードで作成されており SP が実行不可 | 手順 4 を実施: パイプラインには `job_cluster` を使用、またはクラスタの `single_user_name` を SP の application_id に変更 |
+| `os.path.exists("/Volumes/...")` が常に `False` | `data_security_mode: NONE` クラスタは UC Volume の FUSE マウントを提供しない | `data_security_mode: SINGLE_USER` に変更し UC を有効化する |
+| `Spark version ... does not support Table Access Control` | GPU ML ランタイム (`15.4.x-gpu-ml-scala2.12`) は `USER_ISOLATION` モード非対応 | `SINGLE_USER` + job_cluster で対処 |
 | `404 Not Found for url: .../vector-search/indexes/.../query` | Vector Search インデックスが未作成 | Step 4 (Vector Search Index 作成) を実施 |
