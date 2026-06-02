@@ -9,20 +9,21 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install openai-whisper transformers sentence-transformers decord pillow
+# MAGIC %pip install openai-whisper decord pillow
 
 # COMMAND ----------
 
 import os
+import base64
+import io
 import json
 import shutil
 import subprocess
 import numpy as np
+import requests
 import torch
 from datetime import datetime
 from decord import VideoReader, cpu
-from transformers import CLIPModel, CLIPProcessor
-from sentence_transformers import SentenceTransformer
 from PIL import Image
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -108,20 +109,24 @@ print(f"準備完了: {len(downloaded_videos)}/{len(video_list)}")
 
 # COMMAND ----------
 
+# Whisper: 音声文字起こし専用 (ローカルロード)
+# Note: Whisperはローカルで実行。音声データbase64が~13MBとなりModel Servingの10MB制限を超えるため。
 print("Whisperモデルロード中...")
 import whisper
 whisper_model = whisper.load_model("base", device=DEVICE)
 print("Whisperロード完了")
 
-print("CLIPモデルロード中...")
-clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(DEVICE)
-clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-clip_model.eval()
-print("CLIPロード完了")
-
-print("テキストembeddingモデルロード中...")
-text_embed_model = SentenceTransformer("intfloat/multilingual-e5-large", device=DEVICE)
-print("テキストembeddingモデルロード完了")
+# CLIP / multilingual-e5: Model Serving エンドポイントで実行
+CLIP_ENDPOINT = "clip-encoder"
+TEXT_EMBED_ENDPOINT = "multilingual-e5-embedder"
+HOST = spark.conf.get("spark.databricks.workspaceUrl")
+TOKEN = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+ENDPOINT_HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type": "application/json",
+}
+print(f"CLIP endpoint: {CLIP_ENDPOINT}")
+print(f"Text embed endpoint: {TEXT_EMBED_ENDPOINT}")
 
 # COMMAND ----------
 
@@ -187,17 +192,29 @@ for video_info in downloaded_videos:
             thumb_path = os.path.join(THUMBNAIL_DIR, f"{segment_id}.jpg")
             thumb.save(thumb_path, "JPEG", quality=80)
 
-            # CLIP image embedding
-            clip_inputs = clip_processor(images=img, return_tensors="pt").to(DEVICE)
-            with torch.no_grad():
-                image_features = clip_model.get_image_features(**clip_inputs)
-                image_embedding = image_features / image_features.norm(dim=-1, keepdim=True)
-            image_emb = image_embedding.cpu().numpy().flatten().tolist()
+            # CLIP image embedding (clip-encoder serving endpoint)
+            img_buf = io.BytesIO()
+            img.save(img_buf, format="JPEG", quality=85)
+            img_b64 = base64.b64encode(img_buf.getvalue()).decode()
+            clip_resp = requests.post(
+                f"https://{HOST}/serving-endpoints/{CLIP_ENDPOINT}/invocations",
+                headers=ENDPOINT_HEADERS,
+                json={"dataframe_records": [{"type": "image", "content": img_b64}]},
+                timeout=30,
+            )
+            clip_resp.raise_for_status()
+            image_emb = clip_resp.json()["predictions"]["embedding"][0]
 
-            # テキスト embedding (multilingual-e5-large)
+            # テキスト embedding (multilingual-e5-embedder serving endpoint)
             if transcript:
-                text_input = f"query: {transcript}"
-                text_emb = text_embed_model.encode(text_input, normalize_embeddings=True).tolist()
+                e5_resp = requests.post(
+                    f"https://{HOST}/serving-endpoints/{TEXT_EMBED_ENDPOINT}/invocations",
+                    headers=ENDPOINT_HEADERS,
+                    json={"dataframe_records": [{"text": transcript}]},
+                    timeout=30,
+                )
+                e5_resp.raise_for_status()
+                text_emb = e5_resp.json()["predictions"]["embedding"][0]
             else:
                 text_emb = [0.0] * 1024
 

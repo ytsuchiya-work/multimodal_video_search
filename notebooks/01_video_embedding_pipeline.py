@@ -8,7 +8,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install decord transformers einops torch torchvision pillow
+# MAGIC %pip install decord pillow
 
 # COMMAND ----------
 
@@ -17,15 +17,14 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import os
+import base64
+import io
 import json
-import uuid
 import numpy as np
-import torch
+import requests
 from datetime import datetime
-from pathlib import Path
 
 from decord import VideoReader, cpu
-from transformers import AutoProcessor, AutoModel
 from PIL import Image
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -47,13 +46,10 @@ VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/thumbnails"
 
 SEGMENT_DURATION = 30  # seconds
 FRAMES_PER_SEGMENT = 8
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
 DOWNLOAD_DIR = "/tmp/videos"
 THUMBNAIL_DIR = "/tmp/thumbnails"
 
-print(f"Device: {DEVICE}")
 print(f"Table: {TABLE_NAME}")
 print(f"Volume: {VOLUME_PATH}")
 
@@ -131,22 +127,18 @@ print(f"\n準備完了: {len(downloaded_videos)}/{len(video_list)}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cosmos-Embed1-448p モデルロード
+# MAGIC ## Model Serving エンドポイント設定
 
 # COMMAND ----------
 
-print("モデルをロード中...")
-model = AutoModel.from_pretrained(
-    "nvidia/Cosmos-Embed1-448p",
-    trust_remote_code=True
-).to(DEVICE, dtype=DTYPE)
-model.eval()
-
-processor = AutoProcessor.from_pretrained(
-    "nvidia/Cosmos-Embed1-448p",
-    trust_remote_code=True
-)
-print("モデルロード完了")
+COSMOS_VIDEO_ENDPOINT = "cosmos-video-encoder"
+HOST = spark.conf.get("spark.databricks.workspaceUrl")
+TOKEN = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+ENDPOINT_HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type": "application/json",
+}
+print(f"Endpoint: https://{HOST}/serving-endpoints/{COSMOS_VIDEO_ENDPOINT}/invocations")
 
 # COMMAND ----------
 
@@ -183,16 +175,23 @@ def save_thumbnail(frames, segment_id, output_dir):
 
 
 def compute_video_embedding(frames):
-    """フレーム列からvideo embeddingを計算"""
-    # BTCHW形式に変換
-    batch = np.transpose(np.expand_dims(frames, 0), (0, 1, 4, 2, 3))
-    video_inputs = processor(videos=batch).to(DEVICE, dtype=DTYPE)
+    """フレーム列からビデオembeddingを計算 (cosmos-video-encoder serving endpoint)"""
+    frames_b64 = []
+    for frame in frames:
+        img = Image.fromarray(frame)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        frames_b64.append(base64.b64encode(buf.getvalue()).decode())
 
-    with torch.no_grad():
-        video_emb = model.get_video_embeddings(**video_inputs)
-
-    embedding = video_emb.visual_proj.cpu().numpy().flatten().tolist()
-    return embedding
+    resp = requests.post(
+        f"https://{HOST}/serving-endpoints/{COSMOS_VIDEO_ENDPOINT}/invocations",
+        headers=ENDPOINT_HEADERS,
+        json={"dataframe_records": [{"frames": frames_b64}]},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    return result["predictions"]["embedding"][0]
 
 # COMMAND ----------
 

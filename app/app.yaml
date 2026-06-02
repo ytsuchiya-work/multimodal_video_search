@@ -13,8 +13,12 @@ env:
     value: "e351c2d1b16eae95"
   - name: VS_ENDPOINT_NAME
     value: "video-search-endpoint"
-  - name: GPU_CLUSTER_ID
-    value: "0602-041404-xp8crh90"
+  - name: COSMOS_ENDPOINT_NAME
+    value: "cosmos-video-encoder"
+  - name: TEXT_EMBED_ENDPOINT_NAME
+    value: "multilingual-e5-embedder"
+  - name: CLIP_ENDPOINT_NAME
+    value: "clip-encoder"
 
 resources:
   - name: sql-warehouse

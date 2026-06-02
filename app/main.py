@@ -21,7 +21,9 @@ CATALOG = os.environ.get("CATALOG", "classic_stable_ytcy_catalog")
 SCHEMA = "multimodal_video_search"
 VS_INDEX_NAME = f"{CATALOG}.{SCHEMA}.video_embeddings_index"
 VS_ENDPOINT_NAME = os.environ.get("VS_ENDPOINT_NAME", "video-search-endpoint")
-GPU_CLUSTER_ID = os.environ.get("GPU_CLUSTER_ID", "0525-034450-fs01avtr")
+COSMOS_ENDPOINT_NAME = os.environ.get("COSMOS_ENDPOINT_NAME", "cosmos-video-encoder")
+TEXT_EMBED_ENDPOINT_NAME = os.environ.get("TEXT_EMBED_ENDPOINT_NAME", "multilingual-e5-embedder")
+CLIP_ENDPOINT_NAME = os.environ.get("CLIP_ENDPOINT_NAME", "clip-encoder")
 WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
 
 w = WorkspaceClient()
@@ -55,7 +57,9 @@ async def health():
     return {
         "status": "ok",
         "index": VS_INDEX_NAME,
-        "cluster": GPU_CLUSTER_ID,
+        "cosmos_endpoint": COSMOS_ENDPOINT_NAME,
+        "text_embed_endpoint": TEXT_EMBED_ENDPOINT_NAME,
+        "clip_endpoint": CLIP_ENDPOINT_NAME,
         "host_configured": bool(DATABRICKS_HOST),
         "warehouse_id": WAREHOUSE_ID,
     }
@@ -63,43 +67,30 @@ async def health():
 
 @app.get("/api/cluster/status")
 async def cluster_status():
-    """GPUクラスタの状態を返す"""
+    """cosmos-video-encoderサービングエンドポイントの状態を返す"""
     try:
         resp = http_requests.get(
-            f"{DATABRICKS_HOST}/api/2.0/clusters/get",
+            f"{DATABRICKS_HOST}/api/2.0/serving-endpoints/{COSMOS_ENDPOINT_NAME}",
             headers=get_db_headers(),
-            params={"cluster_id": GPU_CLUSTER_ID},
         )
         resp.raise_for_status()
         data = resp.json()
+        state = data.get("state", {})
+        ready = state.get("ready", "UNKNOWN")
         return {
-            "state": data.get("state"),
-            "cluster_name": data.get("cluster_name"),
-            "state_message": data.get("state_message", ""),
+            "state": "RUNNING" if ready == "READY" else ready,
+            "cluster_name": COSMOS_ENDPOINT_NAME,
+            "state_message": "Model Serving endpoint (auto-scales on demand)",
         }
     except Exception as e:
-        logger.error(f"Cluster status error: {e}")
+        logger.error(f"Endpoint status error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/cluster/start")
 async def cluster_start():
-    """GPUクラスタを起動する"""
-    try:
-        resp = http_requests.post(
-            f"{DATABRICKS_HOST}/api/2.0/clusters/start",
-            headers=get_db_headers(),
-            json={"cluster_id": GPU_CLUSTER_ID},
-        )
-        if resp.status_code == 200:
-            return {"status": "starting"}
-        detail = resp.json().get("message", resp.text)
-        raise HTTPException(status_code=resp.status_code, detail=detail)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Cluster start error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Model Servingはリクエスト時に自動スケールするため手動起動は不要"""
+    return {"status": "auto_scaling", "message": "Model Serving endpoints scale automatically on first request."}
 
 
 @app.post("/api/search")
@@ -143,8 +134,8 @@ async def search_videos(request: SearchRequest):
     except Exception as e:
         logger.error(f"Search error: {e}")
         err_msg = str(e)
-        if "not currently ready" in err_msg or "ClusterNotReady" in err_msg or "Terminated" in err_msg:
-            raise HTTPException(status_code=503, detail="GPUクラスタが停止中です。起動完了までお待ちください（数分かかります）。")
+        if "not currently ready" in err_msg or "ENDPOINT_NOT_READY" in err_msg or "503" in err_msg:
+            raise HTTPException(status_code=503, detail="Model Servingエンドポイントがスケールアップ中です。しばらくお待ちください。")
         raise HTTPException(status_code=500, detail=err_msg)
 
 
@@ -231,8 +222,8 @@ async def search_multimodal(request: SearchRequest):
     except Exception as e:
         logger.error(f"Multimodal search error: {e}")
         err_msg = str(e)
-        if "not currently ready" in err_msg or "ClusterNotReady" in err_msg or "Terminated" in err_msg:
-            raise HTTPException(status_code=503, detail="GPUクラスタが停止中です。起動完了までお待ちください。")
+        if "not currently ready" in err_msg or "ENDPOINT_NOT_READY" in err_msg or "503" in err_msg:
+            raise HTTPException(status_code=503, detail="Model Servingエンドポイントがスケールアップ中です。しばらくお待ちください。")
         raise HTTPException(status_code=500, detail=err_msg)
 
 
@@ -298,198 +289,44 @@ async def get_thumbnail(segment_id: str):
         raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
-NOTEBOOK_PATH = "/Workspace/Users/yusuke.tsuchiya@databricks.com/video-search-cosmos/_text_embed_notebook"
-MULTIMODAL_EMBED_NOTEBOOK = "/Workspace/Users/yusuke.tsuchiya@databricks.com/video-search-cosmos/_multimodal_embed_notebook"
-
 MM_TEXT_INDEX = f"{CATALOG}.{SCHEMA}.multimodal_text_index"
 MM_IMAGE_INDEX = f"{CATALOG}.{SCHEMA}.multimodal_image_index"
 
 
-def _ensure_embedding_notebook():
-    """テキストembedding計算用のノートブックが存在することを確認"""
-    import base64
-
-    notebook_code = '''# Databricks notebook source
-import torch, json
-from transformers import AutoProcessor, AutoModel
-
-query_text = dbutils.widgets.get("query_text")
-
-model = AutoModel.from_pretrained("nvidia/Cosmos-Embed1-448p", trust_remote_code=True)
-model = model.to("cuda", dtype=torch.float16).eval()
-processor = AutoProcessor.from_pretrained("nvidia/Cosmos-Embed1-448p", trust_remote_code=True)
-
-inputs = processor(text=[query_text]).to("cuda", dtype=torch.float16)
-with torch.no_grad():
-    emb = model.get_text_embeddings(**inputs)
-result = emb.text_proj.cpu().numpy().flatten().tolist()
-dbutils.notebook.exit(json.dumps(result))
-'''
-    nb_b64 = base64.b64encode(notebook_code.encode()).decode()
-    http_requests.post(
-        f"{DATABRICKS_HOST}/api/2.0/workspace/import",
+def get_text_embedding(text: str) -> list:
+    """cosmos-video-encoder serving endpointでテキストembeddingを計算 (768次元)"""
+    resp = http_requests.post(
+        f"{DATABRICKS_HOST}/serving-endpoints/{COSMOS_ENDPOINT_NAME}/invocations",
         headers=get_db_headers(),
-        json={
-            "path": NOTEBOOK_PATH,
-            "format": "SOURCE",
-            "language": "PYTHON",
-            "content": nb_b64,
-            "overwrite": True,
-        },
+        json={"dataframe_records": [{"type": "text", "content": text}]},
+        timeout=60,
     )
-
-
-def _ensure_multimodal_embed_notebook():
-    """マルチモーダル検索用embedding計算ノートブック (e5 + CLIP)"""
-    import base64
-
-    notebook_code = '''# Databricks notebook source
-import torch, json
-from sentence_transformers import SentenceTransformer
-from transformers import CLIPModel, CLIPProcessor, CLIPTokenizer
-
-query_text = dbutils.widgets.get("query_text")
-embed_type = dbutils.widgets.get("embed_type")
-
-if embed_type == "text":
-    model = SentenceTransformer("intfloat/multilingual-e5-large", device="cuda")
-    text_input = f"query: {query_text}"
-    emb = model.encode(text_input, normalize_embeddings=True).tolist()
-    dbutils.notebook.exit(json.dumps(emb))
-elif embed_type == "clip":
-    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to("cuda")
-    clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-    clip_model.eval()
-    inputs = clip_processor(text=[query_text], return_tensors="pt", padding=True).to("cuda")
-    with torch.no_grad():
-        text_features = clip_model.get_text_features(**inputs)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-    emb = text_features.cpu().numpy().flatten().tolist()
-    dbutils.notebook.exit(json.dumps(emb))
-else:
-    dbutils.notebook.exit(json.dumps({"error": "invalid embed_type"}))
-'''
-    nb_b64 = base64.b64encode(notebook_code.encode()).decode()
-    http_requests.post(
-        f"{DATABRICKS_HOST}/api/2.0/workspace/import",
-        headers=get_db_headers(),
-        json={
-            "path": MULTIMODAL_EMBED_NOTEBOOK,
-            "format": "SOURCE",
-            "language": "PYTHON",
-            "content": nb_b64,
-            "overwrite": True,
-        },
-    )
-
-
-# Create notebooks on startup
-_ensure_embedding_notebook()
-_ensure_multimodal_embed_notebook()
+    resp.raise_for_status()
+    result = resp.json()
+    return result["predictions"]["embedding"][0]
 
 
 def get_multimodal_embedding(text: str, embed_type: str) -> list:
-    """GPU上でマルチモーダルembeddingを計算 (e5 text or CLIP text)"""
-    import time
-
-    submit_resp = http_requests.post(
-        f"{DATABRICKS_HOST}/api/2.1/jobs/runs/submit",
-        headers=get_db_headers(),
-        json={
-            "run_name": f"multimodal-embed-{embed_type}",
-            "existing_cluster_id": GPU_CLUSTER_ID,
-            "notebook_task": {
-                "notebook_path": MULTIMODAL_EMBED_NOTEBOOK,
-                "base_parameters": {"query_text": text, "embed_type": embed_type},
-            },
-        },
-    )
-    submit_resp.raise_for_status()
-    run_id = submit_resp.json()["run_id"]
-
-    for _ in range(90):
-        time.sleep(2)
-        status_resp = http_requests.get(
-            f"{DATABRICKS_HOST}/api/2.1/jobs/runs/get",
+    """serving endpointでマルチモーダルembeddingを計算"""
+    if embed_type == "text":
+        resp = http_requests.post(
+            f"{DATABRICKS_HOST}/serving-endpoints/{TEXT_EMBED_ENDPOINT_NAME}/invocations",
             headers=get_db_headers(),
-            params={"run_id": run_id},
+            json={"dataframe_records": [{"text": text}]},
+            timeout=60,
         )
-        status_resp.raise_for_status()
-        run_data = status_resp.json()
-        state = run_data.get("state", {})
-        life_cycle = state.get("life_cycle_state", "")
-        result_state = state.get("result_state", "")
-
-        if life_cycle == "TERMINATED":
-            if result_state == "SUCCESS":
-                output_resp = http_requests.get(
-                    f"{DATABRICKS_HOST}/api/2.1/jobs/runs/get-output",
-                    headers=get_db_headers(),
-                    params={"run_id": run_id},
-                )
-                output_resp.raise_for_status()
-                notebook_output = output_resp.json().get("notebook_output", {})
-                result_str = notebook_output.get("result", "")
-                return json.loads(result_str)
-            else:
-                error_msg = state.get("state_message", "Unknown error")
-                raise ValueError(f"Embedding計算失敗: {error_msg}")
-        elif life_cycle in ("INTERNAL_ERROR", "SKIPPED"):
-            raise ValueError(f"実行失敗: {state.get('state_message', life_cycle)}")
-
-    raise TimeoutError("Embedding計算がタイムアウトしました (3分)")
-
-
-def get_text_embedding(text: str) -> list:
-    """GPUクラスタ上でCosmos-Embed1テキストembeddingを計算 (Jobs Run Submit API)"""
-    import time
-
-    submit_resp = http_requests.post(
-        f"{DATABRICKS_HOST}/api/2.1/jobs/runs/submit",
-        headers=get_db_headers(),
-        json={
-            "run_name": "text-embedding-query",
-            "existing_cluster_id": GPU_CLUSTER_ID,
-            "notebook_task": {
-                "notebook_path": NOTEBOOK_PATH,
-                "base_parameters": {"query_text": text},
-            },
-        },
-    )
-    submit_resp.raise_for_status()
-    run_id = submit_resp.json()["run_id"]
-
-    for _ in range(90):
-        time.sleep(2)
-        status_resp = http_requests.get(
-            f"{DATABRICKS_HOST}/api/2.1/jobs/runs/get",
+    elif embed_type == "clip":
+        resp = http_requests.post(
+            f"{DATABRICKS_HOST}/serving-endpoints/{CLIP_ENDPOINT_NAME}/invocations",
             headers=get_db_headers(),
-            params={"run_id": run_id},
+            json={"dataframe_records": [{"type": "text", "content": text}]},
+            timeout=60,
         )
-        status_resp.raise_for_status()
-        run_data = status_resp.json()
-        state = run_data.get("state", {})
-        life_cycle = state.get("life_cycle_state", "")
-        result_state = state.get("result_state", "")
-
-        if life_cycle == "TERMINATED":
-            if result_state == "SUCCESS":
-                output_resp = http_requests.get(
-                    f"{DATABRICKS_HOST}/api/2.1/jobs/runs/get-output",
-                    headers=get_db_headers(),
-                    params={"run_id": run_id},
-                )
-                output_resp.raise_for_status()
-                notebook_output = output_resp.json().get("notebook_output", {})
-                result_str = notebook_output.get("result", "")
-                return json.loads(result_str)
-            else:
-                error_msg = state.get("state_message", "Unknown error")
-                raise ValueError(f"Embedding計算失敗: {error_msg}")
-        elif life_cycle in ("INTERNAL_ERROR", "SKIPPED"):
-            raise ValueError(f"実行失敗: {state.get('state_message', life_cycle)}")
-
-    raise TimeoutError("テキストembedding計算がタイムアウトしました (3分)")
+    else:
+        raise ValueError(f"Unknown embed_type: {embed_type}")
+    resp.raise_for_status()
+    result = resp.json()
+    return result["predictions"]["embedding"][0]
 
 
 @app.get("/api/videos/{video_id}/stream")
