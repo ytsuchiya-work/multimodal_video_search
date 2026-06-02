@@ -335,7 +335,35 @@ databricks --profile fe-vm-classic-stable-ytcy api patch \
 
 ### 権限設定が不足している場合のエラー
 
+### 3. GPU クラスタの data_security_mode
+
+GPU クラスタを `SINGLE_USER` モードで作成すると、作成者のみが実行できる制約がかかる。SP が Jobs Run Submit でジョブを投入できるよう、クラスタは `NONE`（アイソレーションなし）モードで作成・設定する。
+
+```bash
+# クラスタ作成時に data_security_mode: "NONE" を指定
+databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/clusters/create" --json '{
+  "cluster_name": "video-search-gpu",
+  "spark_version": "15.4.x-gpu-ml-scala2.12",
+  "node_type_id": "g4dn.xlarge",
+  "num_workers": 0,
+  "data_security_mode": "NONE",
+  "spark_conf": {"spark.databricks.cluster.profile": "singleNode", "spark.master": "local[*]"},
+  "custom_tags": {"ResourceClass": "SingleNode"},
+  "autotermination_minutes": 60
+}'
+
+# 既存クラスタを変更する場合
+databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/clusters/edit" --json '{
+  "cluster_id": "<cluster_id>",
+  ...,
+  "data_security_mode": "NONE"
+}'
+```
+
+### 権限設定が不足している場合のエラー
+
 | エラーメッセージ | 原因 | 対処 |
 |--------------|------|------|
 | `Unable to access the notebook ... lacks the required permissions` | ノートブックディレクトリへの権限なし | 手順 1 を実施 |
 | `job run-as ... lacks 'Attach' permissions on the underlying cluster` | GPU クラスタへの Attach 権限なし | 手順 2 を実施 |
+| `Single-user check failed: user '...' attempted to run a command on single-user cluster` | クラスタが SINGLE_USER モードで作成されており SP が実行不可 | 手順 3 を実施: クラスタを `data_security_mode: NONE` に変更 |
