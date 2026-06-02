@@ -317,23 +317,40 @@ databricks --profile fe-vm-classic-stable-ytcy api patch \
 
 > **補足**: アプリの SP の application_id は `databricks apps get <app_name>` の `service_principal_client_id` フィールドで確認できる。
 
-### 2. Vector Search エンドポイントへの CAN_USE 権限
+### 2. Vector Search エンドポイントへの CAN_USE 権限 + Unity Catalog 権限
 
-SP が Vector Search インデックスをクエリするには、エンドポイントへの `CAN_USE` 権限が必要。`app.yaml` の `resources` 宣言だけでは自動付与されない場合があるため、明示的に付与する。
+SP が Vector Search インデックスをクエリするには、エンドポイントへの `CAN_USE` 権限に加え、Unity Catalog のカタログ・スキーマ・テーブルへのアクセス権が必要。`app.yaml` の `resources` 宣言だけでは自動付与されない。
 
 ```bash
-# エンドポイントの ID を取得
+# (a) VS エンドポイントへの CAN_USE
 ENDPOINT_ID=$(databricks --profile fe-vm-classic-stable-ytcy api get \
   "/api/2.0/vector-search/endpoints/video-search-endpoint" \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 
-# CAN_USE を付与
 databricks --profile fe-vm-classic-stable-ytcy api patch \
   "/api/2.0/permissions/vector-search-endpoints/${ENDPOINT_ID}" --json '{
   "access_control_list": [{
     "service_principal_name": "<app_sp_application_id>",
     "permission_level": "CAN_USE"
   }]
+}'
+
+# (b) Unity Catalog 権限 (SQL Warehouse 経由で実行)
+databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/sql/statements" --json '{
+  "warehouse_id": "<warehouse_id>",
+  "statement": "GRANT USE CATALOG ON CATALOG classic_stable_ytcy_catalog TO `<app_sp_application_id>`"
+}'
+databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/sql/statements" --json '{
+  "warehouse_id": "<warehouse_id>",
+  "statement": "GRANT USE SCHEMA ON SCHEMA classic_stable_ytcy_catalog.multimodal_video_search TO `<app_sp_application_id>`"
+}'
+databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/sql/statements" --json '{
+  "warehouse_id": "<warehouse_id>",
+  "statement": "GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.video_embeddings TO `<app_sp_application_id>`"
+}'
+databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/sql/statements" --json '{
+  "warehouse_id": "<warehouse_id>",
+  "statement": "GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.multimodal_segments TO `<app_sp_application_id>`"
 }'
 ```
 
@@ -383,7 +400,7 @@ databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/clusters/edit"
 | エラーメッセージ | 原因 | 対処 |
 |--------------|------|------|
 | `Unable to access the notebook ... lacks the required permissions` | ノートブックディレクトリへの権限なし | 手順 1 を実施 |
-| `403 Forbidden for url: .../vector-search/indexes/.../query` | SP が Vector Search エンドポイントへの CAN_USE 権限なし | 手順 2 を実施 |
+| `403 Forbidden for url: .../vector-search/indexes/.../query` | SP が Vector Search エンドポイントの CAN_USE 権限なし、または Unity Catalog (USE CATALOG / USE SCHEMA / SELECT) 権限なし | 手順 2 を実施 |
 | `job run-as ... lacks 'Attach' permissions on the underlying cluster` | GPU クラスタへの Attach 権限なし | 手順 3 を実施 |
 | `Single-user check failed: user '...' attempted to run a command on single-user cluster` | クラスタが SINGLE_USER モードで作成されており SP が実行不可 | 手順 4 を実施: クラスタを `data_security_mode: NONE` に変更 |
 | `404 Not Found for url: .../vector-search/indexes/.../query` | Vector Search インデックスが未作成 | Step 4 (Vector Search Index 作成) を実施 |
