@@ -291,3 +291,51 @@ resources:
 - g4dn.xlarge (T4 GPU) では bfloat16 が使えないため float16 を使用 (A10G/A100 では bfloat16 可)
 - Vector Search Index の初回プロビジョニングには15-30分程度かかる
 - GPU クラスタは Service Principal の single-user モードで動作し、アプリの SP が embedding 計算ジョブを実行する
+
+## アプリ SP への権限設定 (新規デプロイ時の必須手順)
+
+Databricks Apps の Service Principal は、デフォルトでは各リソースへのアクセス権を持たない。アプリをデプロイした後、以下の権限を手動で付与する必要がある。
+
+### 1. ノートブックディレクトリへの CAN_MANAGE 権限
+
+アプリは起動時に embedding 計算用ノートブックを `/Workspace/Users/<user>/video-search-cosmos/` に動的作成する。SP がそのディレクトリを読み書きできるよう権限を付与する。
+
+```bash
+# ディレクトリの object_id を取得
+databricks --profile fe-vm-classic-stable-ytcy api get \
+  "/api/2.0/workspace/get-status?path=/Users/yusuke.tsuchiya@databricks.com/video-search-cosmos"
+
+# CAN_MANAGE を付与 (<directory_object_id> は上記で取得した object_id)
+databricks --profile fe-vm-classic-stable-ytcy api patch \
+  "/api/2.0/permissions/directories/<directory_object_id>" --json '{
+  "access_control_list": [{
+    "service_principal_name": "<app_sp_application_id>",
+    "permission_level": "CAN_MANAGE"
+  }]
+}'
+```
+
+> **補足**: アプリの SP の application_id は `databricks apps get <app_name>` の `service_principal_client_id` フィールドで確認できる。
+
+### 2. GPU クラスタへの CAN_ATTACH_TO 権限
+
+アプリは Jobs Run Submit API を使って SP の権限で GPU クラスタにジョブを投入する。SP がクラスタにアタッチできるよう権限を付与する。
+
+```bash
+databricks --profile fe-vm-classic-stable-ytcy api patch \
+  "/api/2.0/permissions/clusters/<cluster_id>" --json '{
+  "access_control_list": [{
+    "service_principal_name": "<app_sp_application_id>",
+    "permission_level": "CAN_ATTACH_TO"
+  }]
+}'
+```
+
+> **補足**: クラスタを起動する場合は `CAN_RESTART`、クラスタ設定も変更する場合は `CAN_MANAGE` が必要。
+
+### 権限設定が不足している場合のエラー
+
+| エラーメッセージ | 原因 | 対処 |
+|--------------|------|------|
+| `Unable to access the notebook ... lacks the required permissions` | ノートブックディレクトリへの権限なし | 手順 1 を実施 |
+| `job run-as ... lacks 'Attach' permissions on the underlying cluster` | GPU クラスタへの Attach 権限なし | 手順 2 を実施 |
