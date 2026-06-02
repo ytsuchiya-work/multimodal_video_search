@@ -353,9 +353,7 @@ databricks --profile fe-vm-classic-stable-ytcy api patch \
 
 > **補足**: クラスタを起動する場合は `CAN_RESTART`、クラスタ設定も変更する場合は `CAN_MANAGE` が必要。
 
-### 権限設定が不足している場合のエラー
-
-### 3. GPU クラスタの data_security_mode
+### 4. GPU クラスタの data_security_mode
 
 GPU クラスタを `SINGLE_USER` モードで作成すると、作成者のみが実行できる制約がかかる。SP が Jobs Run Submit でジョブを投入できるよう、クラスタは `NONE`（アイソレーションなし）モードで作成・設定する。
 
@@ -385,7 +383,7 @@ databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/clusters/edit"
 | エラーメッセージ | 原因 | 対処 |
 |--------------|------|------|
 | `Unable to access the notebook ... lacks the required permissions` | ノートブックディレクトリへの権限なし | 手順 1 を実施 |
-| `job run-as ... lacks 'Attach' permissions on the underlying cluster` | GPU クラスタへの Attach 権限なし | 手順 2 を実施 |
-| `Single-user check failed: user '...' attempted to run a command on single-user cluster` | クラスタが SINGLE_USER モードで作成されており SP が実行不可 | 手順 3 を実施: クラスタを `data_security_mode: NONE` に変更 |
-| `404 Not Found for url: .../vector-search/indexes/.../query` | Vector Search インデックスが未作成 | Step 4 (Vector Search Index 作成) を実施 |
 | `403 Forbidden for url: .../vector-search/indexes/.../query` | SP が Vector Search エンドポイントへの CAN_USE 権限なし | 手順 2 を実施 |
+| `job run-as ... lacks 'Attach' permissions on the underlying cluster` | GPU クラスタへの Attach 権限なし | 手順 3 を実施 |
+| `Single-user check failed: user '...' attempted to run a command on single-user cluster` | クラスタが SINGLE_USER モードで作成されており SP が実行不可 | 手順 4 を実施: クラスタを `data_security_mode: NONE` に変更 |
+| `404 Not Found for url: .../vector-search/indexes/.../query` | Vector Search インデックスが未作成 | Step 4 (Vector Search Index 作成) を実施 |
