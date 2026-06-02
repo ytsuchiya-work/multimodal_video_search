@@ -317,7 +317,27 @@ databricks --profile fe-vm-classic-stable-ytcy api patch \
 
 > **補足**: アプリの SP の application_id は `databricks apps get <app_name>` の `service_principal_client_id` フィールドで確認できる。
 
-### 2. GPU クラスタへの CAN_ATTACH_TO 権限
+### 2. Vector Search エンドポイントへの CAN_USE 権限
+
+SP が Vector Search インデックスをクエリするには、エンドポイントへの `CAN_USE` 権限が必要。`app.yaml` の `resources` 宣言だけでは自動付与されない場合があるため、明示的に付与する。
+
+```bash
+# エンドポイントの ID を取得
+ENDPOINT_ID=$(databricks --profile fe-vm-classic-stable-ytcy api get \
+  "/api/2.0/vector-search/endpoints/video-search-endpoint" \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+
+# CAN_USE を付与
+databricks --profile fe-vm-classic-stable-ytcy api patch \
+  "/api/2.0/permissions/vector-search-endpoints/${ENDPOINT_ID}" --json '{
+  "access_control_list": [{
+    "service_principal_name": "<app_sp_application_id>",
+    "permission_level": "CAN_USE"
+  }]
+}'
+```
+
+### 3. GPU クラスタへの CAN_ATTACH_TO 権限
 
 アプリは Jobs Run Submit API を使って SP の権限で GPU クラスタにジョブを投入する。SP がクラスタにアタッチできるよう権限を付与する。
 
@@ -368,3 +388,4 @@ databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/clusters/edit"
 | `job run-as ... lacks 'Attach' permissions on the underlying cluster` | GPU クラスタへの Attach 権限なし | 手順 2 を実施 |
 | `Single-user check failed: user '...' attempted to run a command on single-user cluster` | クラスタが SINGLE_USER モードで作成されており SP が実行不可 | 手順 3 を実施: クラスタを `data_security_mode: NONE` に変更 |
 | `404 Not Found for url: .../vector-search/indexes/.../query` | Vector Search インデックスが未作成 | Step 4 (Vector Search Index 作成) を実施 |
+| `403 Forbidden for url: .../vector-search/indexes/.../query` | SP が Vector Search エンドポイントへの CAN_USE 権限なし | 手順 2 を実施 |
