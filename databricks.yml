@@ -1,0 +1,19 @@
+bundle:
+  name: video-search-cosmos
+
+workspace:
+  host: https://fevm-classic-stable-ytcy.cloud.databricks.com/
+  profile: fe-vm-classic-stable-ytcy
+
+variables:
+  catalog:
+    default: classic_stable_ytcy_catalog
+  schema:
+    default: multimodal_video_search
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      root_path: /Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

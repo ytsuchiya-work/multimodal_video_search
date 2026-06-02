@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# App-specific
+app/frontend/node_modules/
+app/frontend/dist/
+app/frontend/package-lock.json

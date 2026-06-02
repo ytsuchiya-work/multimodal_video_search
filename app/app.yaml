@@ -1,0 +1,27 @@
+command:
+  - uvicorn
+  - main:app
+  - --host
+  - "0.0.0.0"
+  - --port
+  - "8000"
+
+env:
+  - name: CATALOG
+    value: "classic_stable_ytcy_catalog"
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "e351c2d1b16eae95"
+  - name: VS_ENDPOINT_NAME
+    value: "video-search-endpoint"
+  - name: GPU_CLUSTER_ID
+    value: "0602-041404-xp8crh90"
+
+resources:
+  - name: sql-warehouse
+    sql_warehouse:
+      id: "e351c2d1b16eae95"
+      permission: CAN_USE
+  - name: vector-search-endpoint
+    vector_search_endpoint:
+      name: video-search-endpoint
+      permission: CAN_USE
