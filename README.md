@@ -367,3 +367,4 @@ databricks --profile fe-vm-classic-stable-ytcy api post "/api/2.0/clusters/edit"
 | `Unable to access the notebook ... lacks the required permissions` | ノートブックディレクトリへの権限なし | 手順 1 を実施 |
 | `job run-as ... lacks 'Attach' permissions on the underlying cluster` | GPU クラスタへの Attach 権限なし | 手順 2 を実施 |
 | `Single-user check failed: user '...' attempted to run a command on single-user cluster` | クラスタが SINGLE_USER モードで作成されており SP が実行不可 | 手順 3 を実施: クラスタを `data_security_mode: NONE` に変更 |
+| `404 Not Found for url: .../vector-search/indexes/.../query` | Vector Search インデックスが未作成 | Step 4 (Vector Search Index 作成) を実施 |
