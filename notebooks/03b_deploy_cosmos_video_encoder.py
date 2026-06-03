@@ -21,7 +21,7 @@ import torch
 import numpy as np
 from mlflow.models.signature import ModelSignature
 from mlflow.types.schema import Schema, ColSpec, TensorSpec
-from transformers import AutoProcessor, AutoModel
+from huggingface_hub import snapshot_download
 
 # COMMAND ----------
 
@@ -44,15 +44,22 @@ mlflow.set_registry_uri("databricks-uc")
 LOCAL_MODEL_DIR = "/tmp/cosmos_embed1_model"
 os.makedirs(LOCAL_MODEL_DIR, exist_ok=True)
 
-if not os.path.exists(os.path.join(LOCAL_MODEL_DIR, "config.json")):
-    print("モデルをHuggingFaceからダウンロード中...")
-    model = AutoModel.from_pretrained("nvidia/Cosmos-Embed1-448p", trust_remote_code=True)
-    processor = AutoProcessor.from_pretrained("nvidia/Cosmos-Embed1-448p", trust_remote_code=True)
-    model.save_pretrained(LOCAL_MODEL_DIR, safe_serialization=False)
-    processor.save_pretrained(LOCAL_MODEL_DIR)
+# Use snapshot_download instead of save_pretrained:
+# save_pretrained saves weights only; trust_remote_code models also need the
+# custom modeling_*.py files, which snapshot_download includes.
+# Without them, the serving endpoint (no HuggingFace internet access) fails with exit code 1.
+py_files = [f for f in os.listdir(LOCAL_MODEL_DIR) if f.endswith(".py")] if os.path.exists(LOCAL_MODEL_DIR) else []
+if not py_files:
+    print("モデルをHuggingFaceからダウンロード中 (snapshot_download)...")
+    snapshot_download(
+        repo_id="nvidia/Cosmos-Embed1-448p",
+        local_dir=LOCAL_MODEL_DIR,
+        ignore_patterns=["*.msgpack", "flax_model*", "tf_model*", "*.ot"],
+    )
     print(f"モデル保存完了: {LOCAL_MODEL_DIR}")
+    print("Pythonファイル:", [f for f in os.listdir(LOCAL_MODEL_DIR) if f.endswith(".py")])
 else:
-    print(f"既存モデルを再利用: {LOCAL_MODEL_DIR}")
+    print(f"既存モデルを再利用 (py files: {py_files}): {LOCAL_MODEL_DIR}")
 
 # COMMAND ----------
 
