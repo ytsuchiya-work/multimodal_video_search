@@ -156,12 +156,12 @@ _COSMOS_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _COSMOS_DTYPE = torch.float16 if _COSMOS_DEVICE == "cuda" else torch.float32
 print(f"デバイス: {_COSMOS_DEVICE}, dtype: {_COSMOS_DTYPE}")
 
+# low_cpu_mem_usage=True causes pos_embed shape mismatch (init_empty_weights uses default
+# image_size=224 → 257 positions, but 448p weights have 1025 positions). Load normally.
 _cosmos_model = AutoModel.from_pretrained(
     COSMOS_LOCAL_DIR,
     trust_remote_code=True,
-    torch_dtype=_COSMOS_DTYPE,
-    low_cpu_mem_usage=True,
-).to(_COSMOS_DEVICE)
+).to(_COSMOS_DEVICE, dtype=_COSMOS_DTYPE)
 _cosmos_model.eval()
 _cosmos_processor = AutoProcessor.from_pretrained(COSMOS_LOCAL_DIR, trust_remote_code=True)
 print("Cosmos モデルロード完了")
