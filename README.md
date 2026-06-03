@@ -632,8 +632,8 @@ def compute_video_embedding(frames):
     return resp.json()["predictions"]["embedding"][0]
 
 # 変更後: モデル直接推論 (ノートブック起動時に一度だけロード)
-_cosmos_model = AutoModel.from_pretrained(COSMOS_LOCAL_DIR, trust_remote_code=True,
-                                           torch_dtype=torch.float16, low_cpu_mem_usage=True).to("cuda")
+# ※ low_cpu_mem_usage=True は使わない (問題10参照)
+_cosmos_model = AutoModel.from_pretrained(COSMOS_LOCAL_DIR, trust_remote_code=True).to("cuda", dtype=torch.float16)
 
 def compute_video_embedding(frames):
     batch = np.transpose(np.expand_dims(np.array(frames), 0), (0, 1, 4, 2, 3))
@@ -652,6 +652,44 @@ def compute_video_embedding(frames):
 - パイプライン実行時に初回 `snapshot_download` で ~2.4GB のダウンロードが発生 (約5〜10分)
 - パイプライン実行中は GPU メモリをモデルが占有する
 - リアルタイム検索クエリ時の Cosmos 検索機能は別途対応が必要 (現状は pipeline で事前計算済みの embedding を使用するため問題なし)
+
+### 問題 10: `low_cpu_mem_usage=True` で Cosmos モデルの `pos_embed` shape mismatch が発生する
+
+**現象**  
+`01_video_embedding_pipeline.py` でパイプラインを実行すると、モデルロード時に以下のエラーが発生する:
+
+```
+ValueError: Trying to set a tensor of shape torch.Size([1, 257, 1408]) in "pos_embed"
+(which has shape torch.Size([1, 1025, 1408])), this look incorrect.
+```
+
+**原因**  
+`AutoModel.from_pretrained(..., low_cpu_mem_usage=True)` は内部で `accelerate` の `init_empty_weights()` を使用する。これはモデルを**デフォルト config の値**で空初期化してから weights を書き込む方式。
+
+Cosmos-Embed1-448p の ViT backbone は `image_size=448` (32×32 パッチ = 1025 positions) だが、`init_empty_weights` がデフォルト config の `image_size=224` (16×16 パッチ = 257 positions) で `pos_embed` を初期化してしまい、実際の weights (1025 positions) とサイズ不一致になる。
+
+| | `image_size` | pos_embed shape |
+|---|---|---|
+| デフォルト config (誤) | 224 | `[1, 257, 1408]` (= 1 + 16×16) |
+| 実際の 448p weights (正) | 448 | `[1, 1025, 1408]` (= 1 + 32×32) |
+
+**解決策**  
+`low_cpu_mem_usage=True` と `torch_dtype` を `from_pretrained` から除去し、ロード後に `.to(device, dtype)` で変換する:
+
+```python
+# NG: low_cpu_mem_usage=True → pos_embed shape mismatch
+_cosmos_model = AutoModel.from_pretrained(
+    COSMOS_LOCAL_DIR, trust_remote_code=True,
+    torch_dtype=torch.float16, low_cpu_mem_usage=True  # ← これが原因
+).to(_COSMOS_DEVICE)
+
+# OK: 通常ロード後に dtype 変換
+_cosmos_model = AutoModel.from_pretrained(
+    COSMOS_LOCAL_DIR, trust_remote_code=True,
+).to(_COSMOS_DEVICE, dtype=_COSMOS_DTYPE)
+```
+
+メモリ使用量は増えるが (一時的に float32 でロード → float16 に変換)、g4dn.xlarge (16GB RAM, 16GB VRAM) では問題なく動作する。
 
 ---
 
