@@ -215,7 +215,7 @@ served_entity = {
     "entity_name": MODEL_NAME,
     "entity_version": str(latest_version),
     "workload_size": "Small",
-    "workload_type": "GPU_MEDIUM",
+    "workload_type": "GPU_SMALL",  # GPU_MEDIUM causes DEPLOYMENT_ABORTED (capacity) in ap-northeast-1
     "scale_to_zero_enabled": True,
 }
 
