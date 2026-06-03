@@ -10,9 +10,8 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install mlflow transformers einops pillow
-# MAGIC # torch/torchvision は GPU ML runtime (15.4.x-gpu-ml-scala2.12) に同梱済み
-# MAGIC dbutils.library.restartPython()
+# MAGIC %pip install einops
+# MAGIC # mlflow/transformers/pillow/torch are pre-installed in GPU ML runtime 15.4
 
 # COMMAND ----------
 

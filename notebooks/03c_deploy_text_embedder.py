@@ -10,9 +10,8 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install mlflow sentence-transformers
-# MAGIC # torch は GPU ML runtime (15.4.x-gpu-ml-scala2.12) に同梱済み
-# MAGIC dbutils.library.restartPython()
+# MAGIC %pip install sentence-transformers --no-deps
+# MAGIC # torch/transformers/numpy/huggingface-hub are pre-installed in GPU ML runtime 15.4
 
 # COMMAND ----------
 
