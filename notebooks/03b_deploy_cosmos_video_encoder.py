@@ -116,7 +116,16 @@ class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
             with torch.no_grad():
                 video_emb = self.model.get_video_embeddings(**video_inputs)
 
-            embedding = video_emb.visual_proj.cpu().float().numpy().flatten().tolist()
+            # get_video_embeddings returns a tensor directly (not an object with attributes)
+            if hasattr(video_emb, 'video_embeds'):
+                emb_tensor = video_emb.video_embeds
+            elif hasattr(video_emb, 'visual_proj'):
+                emb_tensor = video_emb.visual_proj
+            elif torch.is_tensor(video_emb):
+                emb_tensor = video_emb
+            else:
+                emb_tensor = video_emb[0] if hasattr(video_emb, '__getitem__') else video_emb
+            embedding = emb_tensor.cpu().float().numpy().flatten().tolist()
             results.append(embedding)
 
         return {"embedding": results}
@@ -141,6 +150,19 @@ pip_requirements = [
     "numpy",
 ]
 
+def _build_input_example():
+    """Build input_example with valid base64 JPEG frames for MLflow health-check."""
+    import base64, io
+    import numpy as np
+    from PIL import Image
+    frames = []
+    for _ in range(2):
+        img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        frames.append(base64.b64encode(buf.getvalue()).decode())
+    return {"frames": [frames]}
+
 with mlflow.start_run(run_name="cosmos-video-encoder-deploy"):
     model_info = mlflow.pyfunc.log_model(
         artifact_path="model",
@@ -149,7 +171,7 @@ with mlflow.start_run(run_name="cosmos-video-encoder-deploy"):
         pip_requirements=pip_requirements,
         signature=signature,
         registered_model_name=MODEL_NAME,
-        input_example={"frames": [["<base64_jpeg_frame_1>", "<base64_jpeg_frame_2>"]]},
+        input_example=_build_input_example(),
     )
 
 print(f"モデル登録完了: {MODEL_NAME}")
