@@ -72,7 +72,8 @@ class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
         from transformers import AutoProcessor, AutoModel
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+        # float16 instead of bfloat16: T4 GPU (compute capability 7.5) does not support bfloat16
+        self.dtype = torch.float16 if self.device == "cuda" else torch.float32
 
         model_path = context.artifacts["model_dir"]
         self.model = AutoModel.from_pretrained(
