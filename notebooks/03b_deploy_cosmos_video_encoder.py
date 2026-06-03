@@ -83,9 +83,12 @@ class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
         self.dtype = torch.float16 if self.device == "cuda" else torch.float32
 
         model_path = context.artifacts["model_dir"]
+        # torch_dtype at load time avoids double-memory (float32 load + float16 convert)
         self.model = AutoModel.from_pretrained(
-            model_path, trust_remote_code=True
-        ).to(self.device, dtype=self.dtype)
+            model_path, trust_remote_code=True,
+            torch_dtype=self.dtype,
+            low_cpu_mem_usage=True,
+        ).to(self.device)
         self.model.eval()
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 
@@ -150,11 +153,14 @@ signature = ModelSignature(inputs=input_schema, outputs=output_schema)
 
 pip_requirements = [
     "transformers>=4.40.0",
+    "accelerate>=0.20.0",  # required for low_cpu_mem_usage and large model loading
+    "safetensors>=0.3.0",  # model uses safetensors shards
     "einops",
     "torch>=2.0.0",
     "torchvision",
     "pillow",
     "numpy",
+    "huggingface_hub>=0.19.0",
 ]
 
 def _build_input_example():
