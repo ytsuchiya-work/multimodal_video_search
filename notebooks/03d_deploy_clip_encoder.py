@@ -10,7 +10,8 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install mlflow transformers torch torchvision pillow
+# MAGIC %pip install mlflow transformers pillow
+# MAGIC # torch/torchvision は GPU ML runtime (15.4.x-gpu-ml-scala2.12) に同梱済み
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------

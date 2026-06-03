@@ -10,7 +10,8 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install mlflow sentence-transformers torch
+# MAGIC %pip install mlflow sentence-transformers
+# MAGIC # torch は GPU ML runtime (15.4.x-gpu-ml-scala2.12) に同梱済み
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
