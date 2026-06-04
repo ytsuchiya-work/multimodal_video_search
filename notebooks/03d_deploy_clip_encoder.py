@@ -121,7 +121,7 @@ with mlflow.start_run(run_name="clip-encoder-deploy"):
         artifact_path="model",
         python_model=CLIPEncoder(),
         artifacts={"model_dir": LOCAL_MODEL_DIR},
-        pip_requirements=["transformers>=4.30.0,<5.0.0", "pillow", "numpy"],
+        pip_requirements=["transformers>=4.30.0,<5.0.0", "torch>=2.0.0", "torchvision", "pillow", "numpy"],
         signature=signature,
         registered_model_name=MODEL_NAME,
         input_example={"type": ["text"], "content": ["データブリックスの機械学習機能"]},
