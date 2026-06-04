@@ -94,6 +94,17 @@ class CLIPEncoder(mlflow.pyfunc.PythonModel):
                 else:
                     raise ValueError(f"Unknown type: {enc_type}. Must be 'text' or 'image'.")
 
+                # transformers >= 4.46 may return ModelOutput instead of tensor
+                if not torch.is_tensor(features):
+                    if hasattr(features, 'image_embeds') and features.image_embeds is not None:
+                        features = features.image_embeds
+                    elif hasattr(features, 'text_embeds') and features.text_embeds is not None:
+                        features = features.text_embeds
+                    elif hasattr(features, 'pooler_output') and features.pooler_output is not None:
+                        features = features.pooler_output
+                    else:
+                        features = next(v for v in features.values() if torch.is_tensor(v))
+
                 features = features / features.norm(dim=-1, keepdim=True)
                 results.append(features.cpu().numpy().flatten().tolist())
 
@@ -110,7 +121,7 @@ with mlflow.start_run(run_name="clip-encoder-deploy"):
         artifact_path="model",
         python_model=CLIPEncoder(),
         artifacts={"model_dir": LOCAL_MODEL_DIR},
-        pip_requirements=["transformers>=4.30.0", "torch>=2.0.0", "torchvision", "pillow", "numpy"],
+        pip_requirements=["transformers>=4.30.0,<5.0.0", "pillow", "numpy"],
         signature=signature,
         registered_model_name=MODEL_NAME,
         input_example={"type": ["text"], "content": ["データブリックスの機械学習機能"]},
