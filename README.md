@@ -1047,13 +1047,21 @@ curl -s -X POST "https://fevm-classic-stable-ytcy.cloud.databricks.com/api/2.1/j
         "num_workers": 0,
         "spark_version": "15.4.x-gpu-ml-scala2.12",
         "node_type_id": "g4dn.xlarge",
-        "aws_attributes": {"availability": "ON_DEMAND"}
+        "aws_attributes": {"availability": "ON_DEMAND"},
+        "data_security_mode": "SINGLE_USER"
       }
     }]
   }'
 ```
 
-> **注意**: `notebook_path` は `/Repos/...` ではなく `/Users/<email>/...` を使う。Git Folder のノートブックは `/Users/<email>/...` 配下に配置されるため、`/Repos/...` パスは存在しない。
+> **注意1**: `notebook_path` は `/Repos/...` ではなく `/Users/<email>/...` を使う。Git Folder のノートブックは `/Users/<email>/...` 配下に配置されるため、`/Repos/...` パスは存在しない。
+>
+> **注意2**: `new_cluster` に `"data_security_mode": "SINGLE_USER"` を必ず指定する。省略すると Unity Catalog が無効なクラスタとして扱われ、`mlflow.set_registry_uri("databricks-uc")` 呼び出し時に以下のエラーが発生する:
+> ```
+> PERMISSION_DENIED: Access denied to clusters that don't have Unity Catalog enabled.
+> Config: host=https://tokyo.cloud.databricks.com, auth_type=runtime
+> ```
+> この `tokyo.cloud.databricks.com` は `fevm-classic-stable-ytcy` ワークスペースのバックエンドホストであり、UC が有効でないクラスタからアクセスしようとしたことを示す。
 
 ---
 
