@@ -287,15 +287,54 @@ databricks --profile fevm-classic-stable-ytcy jobs run-now 874014520497877
 
 ## 検索の仕組み
 
-### Cosmos検索
+### Embedding の対応関係
+
+各インデックスは **構築時と同じモデル・同じ空間** でクエリする必要がある。以下にその対応をまとめる。
+
+#### Cosmos検索
+
+| フェーズ | 対象 | モデル | 次元 | 備考 |
+|---------|------|--------|------|------|
+| **構築時** (パイプライン) | 動画セグメント (8フレーム/30秒) | Cosmos-Embed1-448p `get_video_embeddings()` | 768 | 映像の視覚的内容をビデオembeddingに変換 |
+| **クエリ時** (アプリ) | テキスト検索クエリ | Cosmos-Embed1-448p `get_text_embeddings()` | 768 | 同一モデルの text encoder — ビデオembeddingと同一空間に写像 |
+
+Cosmos-Embed1 は video-text joint embedding モデルであり、**テキストとビデオを同一の embedding 空間に射影する**ように学習されている。クエリ時にテキストを同モデルでエンコードすることで、テキストと動画の意味的類似度が計算できる。
+
+```
+[パイプライン]  動画フレーム × 8 → cosmos-video-encoder (get_video_embeddings) → 768次元 → video_embeddings_index
+[クエリ]        テキスト         → cosmos-video-encoder (get_text_embeddings)  → 768次元 → コサイン類似度検索
+```
+
+#### マルチモーダル検索
+
+| インデックス | 構築時の対象 | 構築時のモデル | クエリ時のモデル | 次元 | 対応の根拠 |
+|------------|------------|--------------|--------------|------|-----------|
+| `multimodal_text_index` | 音声文字起こし (Whisper) | multilingual-e5-large `encode(transcript)` | multilingual-e5-large `encode(query)` | 1024 | 同一モデル・同一空間 |
+| `multimodal_image_index` | 動画フレーム中央1枚 | CLIP `get_image_features(frame)` | CLIP `get_text_features(query)` | 512 | CLIP はテキスト・画像を同一空間に射影するよう学習 → テキストで画像インデックスを検索できる |
+
+```
+[パイプライン]  字幕テキスト → multilingual-e5-embedder → 1024次元 → multimodal_text_index
+               フレーム画像 → clip-encoder (image)      →  512次元 → multimodal_image_index
+
+[クエリ]        テキスト     → multilingual-e5-embedder → 1024次元 → multimodal_text_index  コサイン類似度
+               テキスト     → clip-encoder (text)       →  512次元 → multimodal_image_index コサイン類似度
+                                                                    ↓
+                                          combined_score = 0.6 × text_score + 0.4 × image_score
+```
+
+> **CLIP のクロスモーダル性について**: CLIP (Contrastive Language-Image Pretraining) はテキストエンコーダーと画像エンコーダーを **対照学習** で同一の embedding 空間に揃えるよう訓練したモデル。インデックス構築時は画像エンコーダー、クエリ時はテキストエンコーダーを使うが、両者は同一空間にあるためコサイン類似度の比較が成立する。
+
+---
+
+### Cosmos検索 (フロー)
 1. ユーザーがテキストクエリを入力
-2. `cosmos-video-encoder` Model Serving endpoint がテキスト query embedding (768次元) を返却
-3. Vector Search Index に対してコサイン類似度で検索
+2. `cosmos-video-encoder` endpoint がテキスト query embedding (768次元) を返却
+3. `video_embeddings_index` に対してコサイン類似度で検索
 4. 類似度スコアの高いセグメントを返却
 
-### マルチモーダル検索
+### マルチモーダル検索 (フロー)
 1. ユーザーがテキストクエリを入力
-2. 2種類のModel Serving endpointを並行呼出し:
+2. 2種類の embedding endpoint を **並行** 呼び出し:
    - `multilingual-e5-embedder` → テキスト query embedding (1024次元)
    - `clip-encoder` → 画像検索用 query embedding (512次元)
 3. それぞれの Vector Search Index に対してコサイン類似度で検索
