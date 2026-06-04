@@ -50,37 +50,9 @@ resources:
               catalog: ${var.catalog}
           timeout_seconds: 600
 
-        - task_key: 03b_deploy_cosmos_encoder
-          job_cluster_key: gpu_cluster
-          notebook_task:
-            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/03b_deploy_cosmos_video_encoder
-            source: WORKSPACE
-            base_parameters:
-              catalog: ${var.catalog}
-          timeout_seconds: 3600
-
-        - task_key: 03c_deploy_text_embedder
-          job_cluster_key: gpu_cluster
-          notebook_task:
-            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/03c_deploy_text_embedder
-            source: WORKSPACE
-            base_parameters:
-              catalog: ${var.catalog}
-          timeout_seconds: 3600
-
-        - task_key: 03d_deploy_clip_encoder
-          job_cluster_key: gpu_cluster
-          notebook_task:
-            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/03d_deploy_clip_encoder
-            source: WORKSPACE
-            base_parameters:
-              catalog: ${var.catalog}
-          timeout_seconds: 3600
-
         - task_key: 01_cosmos_embedding
           depends_on:
             - task_key: 00_download_videos
-            - task_key: 03b_deploy_cosmos_encoder
           job_cluster_key: gpu_cluster
           notebook_task:
             notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/01_video_embedding_pipeline
@@ -92,8 +64,6 @@ resources:
         - task_key: 04_multimodal_pipeline
           depends_on:
             - task_key: 00_download_videos
-            - task_key: 03c_deploy_text_embedder
-            - task_key: 03d_deploy_clip_encoder
           job_cluster_key: gpu_cluster
           notebook_task:
             notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/04_multimodal_pipeline
