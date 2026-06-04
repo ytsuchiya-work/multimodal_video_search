@@ -29,3 +29,15 @@ resources:
     vector_search_endpoint:
       name: video-search-endpoint
       permission: CAN_USE
+  - name: cosmos-encoder
+    serving_endpoint:
+      name: cosmos-video-encoder
+      permission: CAN_QUERY
+  - name: text-embedder
+    serving_endpoint:
+      name: multilingual-e5-embedder
+      permission: CAN_QUERY
+  - name: clip-encoder-resource
+    serving_endpoint:
+      name: clip-encoder
+      permission: CAN_QUERY

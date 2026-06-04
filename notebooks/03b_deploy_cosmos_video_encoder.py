@@ -85,9 +85,10 @@ else:
 
 # DBTITLE 1,Cell 8
 class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
-    """Cosmos-Embed1-448p のビデオエンコーダー。
-    入力: base64 JPEG フレームのリスト (1セグメント = 8フレーム)
-    出力: 768次元 embedding ベクトル
+    """Cosmos-Embed1-448p のビデオ/テキストエンコーダー。
+    入力 (video): {"frames": [base64_jpeg, ...]}  → 768次元 embedding
+    入力 (text):  {"type": "text", "content": "query string"} → 768次元 embedding
+    出力: 768次元 L2正規化済み embedding
     """
 
     def load_context(self, context):
@@ -108,51 +109,91 @@ class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
         self.model.eval()
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 
-    def predict(self, context, model_input):
-        import base64
-        import io
+    def _embed_video(self, frames_b64):
+        import base64, io
         import numpy as np
         import torch
-        import pandas as pd
         from PIL import Image
 
-        if isinstance(model_input, pd.DataFrame):
-            frames_b64_rows = model_input["frames"].tolist()
-        elif isinstance(model_input, dict):
-            frames_b64_rows = model_input.get("frames", [])
-            if isinstance(frames_b64_rows[0], str):
-                # 単一セグメントの場合: フレームのリストがそのまま渡される
-                frames_b64_rows = [frames_b64_rows]
+        frames = []
+        for f_b64 in frames_b64:
+            img_bytes = base64.b64decode(f_b64)
+            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            frames.append(np.array(img))
+
+        frames_np = np.array(frames)  # (T, H, W, C)
+        batch = np.transpose(np.expand_dims(frames_np, 0), (0, 1, 4, 2, 3))  # BTCHW
+        video_inputs = self.processor(videos=batch).to(self.device, dtype=self.dtype)
+
+        with torch.no_grad():
+            video_emb = self.model.get_video_embeddings(**video_inputs)
+
+        if hasattr(video_emb, 'video_embeds'):
+            emb_tensor = video_emb.video_embeds
+        elif hasattr(video_emb, 'visual_proj'):
+            emb_tensor = video_emb.visual_proj
+        elif torch.is_tensor(video_emb):
+            emb_tensor = video_emb
         else:
-            raise ValueError(f"Unsupported input type: {type(model_input)}")
+            emb_tensor = video_emb[0] if hasattr(video_emb, '__getitem__') else video_emb
+        return emb_tensor.cpu().float().numpy().flatten().tolist()
+
+    def _embed_text(self, text):
+        import torch
+
+        text_inputs = self.processor(text=[text], return_tensors="pt", padding=True).to(self.device)
+        with torch.no_grad():
+            text_emb = self.model.get_text_embeddings(**text_inputs)
+
+        if hasattr(text_emb, 'text_embeds'):
+            emb_tensor = text_emb.text_embeds
+        elif torch.is_tensor(text_emb):
+            emb_tensor = text_emb
+        else:
+            emb_tensor = next(v for v in vars(text_emb).values() if torch.is_tensor(v))
+        emb_tensor = emb_tensor.float()
+        # L2 normalize
+        emb_tensor = emb_tensor / emb_tensor.norm(dim=-1, keepdim=True)
+        return emb_tensor.cpu().numpy().flatten().tolist()
+
+    def predict(self, context, model_input):
+        import pandas as pd
 
         results = []
-        for frames_b64 in frames_b64_rows:
-            frames = []
-            for f_b64 in frames_b64:
-                img_bytes = base64.b64decode(f_b64)
-                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                frames.append(np.array(img))
 
-            frames_np = np.array(frames)  # (T, H, W, C)
-            # BTCHW フォーマットに変換
-            batch = np.transpose(np.expand_dims(frames_np, 0), (0, 1, 4, 2, 3))
-            video_inputs = self.processor(videos=batch).to(self.device, dtype=self.dtype)
-
-            with torch.no_grad():
-                video_emb = self.model.get_video_embeddings(**video_inputs)
-
-            # get_video_embeddings returns a tensor directly (not an object with attributes)
-            if hasattr(video_emb, 'video_embeds'):
-                emb_tensor = video_emb.video_embeds
-            elif hasattr(video_emb, 'visual_proj'):
-                emb_tensor = video_emb.visual_proj
-            elif torch.is_tensor(video_emb):
-                emb_tensor = video_emb
+        if isinstance(model_input, pd.DataFrame):
+            if "type" in model_input.columns:
+                for _, row in model_input.iterrows():
+                    if row["type"] == "text":
+                        results.append(self._embed_text(row["content"]))
+                    else:
+                        import json
+                        frames = json.loads(row["content"]) if isinstance(row["content"], str) else row["content"]
+                        results.append(self._embed_video(frames))
             else:
-                emb_tensor = video_emb[0] if hasattr(video_emb, '__getitem__') else video_emb
-            embedding = emb_tensor.cpu().float().numpy().flatten().tolist()
-            results.append(embedding)
+                for frames_b64 in model_input["frames"].tolist():
+                    results.append(self._embed_video(frames_b64))
+        elif isinstance(model_input, dict):
+            if "type" in model_input:
+                types = model_input["type"]
+                contents = model_input["content"]
+                if isinstance(types, str):
+                    types, contents = [types], [contents]
+                for t, c in zip(types, contents):
+                    if t == "text":
+                        results.append(self._embed_text(c))
+                    else:
+                        import json
+                        frames = json.loads(c) if isinstance(c, str) else c
+                        results.append(self._embed_video(frames))
+            else:
+                frames_b64_rows = model_input.get("frames", [])
+                if frames_b64_rows and isinstance(frames_b64_rows[0], str):
+                    frames_b64_rows = [frames_b64_rows]
+                for frames_b64 in frames_b64_rows:
+                    results.append(self._embed_video(frames_b64))
+        else:
+            raise ValueError(f"Unsupported input type: {type(model_input)}")
 
         return {"embedding": results}
 
@@ -164,7 +205,8 @@ class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
 # COMMAND ----------
 
 # DBTITLE 1,Cell 10
-input_schema = Schema([ColSpec("string", "frames")])  # JSON配列文字列 or array
+# Accept both {frames: [...]} and {type: "text/video", content: "..."} inputs
+input_schema = Schema([ColSpec("string", "type"), ColSpec("string", "content")])
 output_schema = Schema([TensorSpec(np.dtype(np.float32), (-1, 768), "embedding")])
 signature = ModelSignature(inputs=input_schema, outputs=output_schema)
 
@@ -180,17 +222,8 @@ pip_requirements = [
 ]
 
 def _build_input_example():
-    """Build input_example with valid base64 JPEG frames for MLflow health-check."""
-    import base64, io
-    import numpy as np
-    from PIL import Image
-    frames = []
-    for _ in range(2):
-        img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        frames.append(base64.b64encode(buf.getvalue()).decode())
-    return {"frames": [frames]}
+    """Build input_example for MLflow health-check (text path, lightweight)."""
+    return {"type": ["text"], "content": ["Databricks machine learning demo"]}
 
 # Remove .cache dir (snapshot_download metadata - not needed for inference)
 import shutil
@@ -297,7 +330,22 @@ import base64, io
 from PIL import Image
 import numpy as np
 
-# ダミー画像フレームを生成してテスト
+scoring_url = f"https://{host}/serving-endpoints/{SERVING_ENDPOINT_NAME}/invocations"
+
+# テスト1: テキストエンコード
+resp = requests.post(
+    scoring_url,
+    headers=headers,
+    json={"dataframe_records": [{"type": "text", "content": "Databricks machine learning demo"}]},
+)
+result = resp.json()
+if "predictions" in result:
+    emb = result["predictions"]["embedding"][0]
+    print(f"テキストテスト成功: embedding 次元 = {len(emb)}")
+else:
+    print(f"テキストテストレスポンス: {json.dumps(result, indent=2)[:300]}")
+
+# テスト2: 動画エンコード (ダミーフレーム)
 dummy_frames = []
 for _ in range(8):
     dummy_img = Image.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
@@ -305,16 +353,14 @@ for _ in range(8):
     dummy_img.save(buf, format="JPEG", quality=85)
     dummy_frames.append(base64.b64encode(buf.getvalue()).decode())
 
-# Invocations API uses /serving-endpoints/ (not /api/2.0/serving-endpoints/)
-scoring_url = f"https://{host}/serving-endpoints/{SERVING_ENDPOINT_NAME}/invocations"
 resp = requests.post(
     scoring_url,
     headers=headers,
-    json={"dataframe_records": [{"frames": dummy_frames}]},
+    json={"dataframe_records": [{"type": "video", "content": dummy_frames}]},
 )
 result = resp.json()
 if "predictions" in result:
     emb = result["predictions"]["embedding"][0]
-    print(f"テスト成功: embedding 次元 = {len(emb)}")
+    print(f"動画テスト成功: embedding 次元 = {len(emb)}")
 else:
-    print(f"レスポンス: {json.dumps(result, indent=2)[:300]}")
+    print(f"動画テストレスポンス: {json.dumps(result, indent=2)[:300]}")

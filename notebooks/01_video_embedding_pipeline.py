@@ -189,7 +189,7 @@ def compute_video_embedding(frames):
     resp = requests.post(
         f"https://{HOST}/serving-endpoints/{COSMOS_ENDPOINT}/invocations",
         headers=ENDPOINT_HEADERS,
-        json={"dataframe_records": [{"frames": frames_b64}]},
+        json={"dataframe_records": [{"type": "video", "content": frames_b64}]},
         timeout=120,
     )
     resp.raise_for_status()
