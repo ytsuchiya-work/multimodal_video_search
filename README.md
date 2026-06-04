@@ -788,7 +788,27 @@ do
 done
 ```
 
-### 2. Model Serving エンドポイントへの CAN_QUERY 権限
+### 2. UC Volume への READ/WRITE VOLUME 権限
+
+SP がサムネイル・動画ファイルを読み書きするには、Volume ごとに権限が必要 (テーブルの SELECT とは別)。
+
+```bash
+SP_ID="<app_sp_application_id>"
+WH_ID="<warehouse_id>"
+
+for STMT in \
+  "GRANT READ VOLUME  ON VOLUME classic_stable_ytcy_catalog.multimodal_video_search.thumbnails TO \`${SP_ID}\`" \
+  "GRANT READ VOLUME  ON VOLUME classic_stable_ytcy_catalog.multimodal_video_search.videos     TO \`${SP_ID}\`" \
+  "GRANT READ VOLUME  ON VOLUME classic_stable_ytcy_catalog.multimodal_video_search.clips      TO \`${SP_ID}\`" \
+  "GRANT WRITE VOLUME ON VOLUME classic_stable_ytcy_catalog.multimodal_video_search.clips      TO \`${SP_ID}\`"
+do
+  curl -s -X POST "https://fevm-classic-stable-ytcy.cloud.databricks.com/api/2.0/sql/statements" \
+    -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+    -d "{\"warehouse_id\": \"${WH_ID}\", \"statement\": \"${STMT}\", \"wait_timeout\": \"30s\"}"
+done
+```
+
+### 3. Model Serving エンドポイントへの CAN_QUERY 権限
 
 SP が embedding 計算の serving endpoint を呼び出すには `CAN_QUERY` 権限が必要。
 
@@ -810,7 +830,9 @@ done
 | エラーメッセージ | 原因 | 対処 |
 |--------------|------|------|
 | `403 Forbidden for url: .../vector-search/indexes/.../query` | SP が VS エンドポイントの CAN_MANAGE 権限なし、または UC (USE CATALOG / USE SCHEMA / SELECT) 権限なし | 手順 1 を実施 (CAN_MANAGE が必要、CAN_USE では不足) |
-| `403 Forbidden for url: .../serving-endpoints/.../invocations` | SP が Model Serving endpoint の CAN_QUERY 権限なし | 手順 2 を実施 |
+| `Insufficient permissions for UC entity ...<index_name>` | SP が VS インデックス UC オブジェクトの SELECT 権限なし (ソーステーブルの SELECT とは別) | 手順 1 の VS インデックス GRANT を実施 |
+| `403 Forbidden for url: .../serving-endpoints/.../invocations` | SP が Model Serving endpoint の CAN_QUERY 権限なし | 手順 3 を実施 |
+| サムネイル "No Thumbnail"、動画再生不可 | SP が UC Volume の READ VOLUME / WRITE VOLUME 権限なし (テーブルの SELECT とは別) | 手順 2 を実施 |
 | `404 Not Found for url: .../vector-search/indexes/.../query` | Vector Search インデックスが未作成 | Step 5 (Vector Search Index 作成) を実施 |
 | `os.path.exists("/Volumes/...")` が常に `False` | `data_security_mode: NONE` クラスタは UC Volume の FUSE マウントを提供しない | パイプラインに `job_cluster` (SINGLE_USER) を使用する |
 | `Spark version ... does not support Table Access Control` | GPU ML ランタイムは `USER_ISOLATION` モード非対応 | `SINGLE_USER` + job_cluster で対処 |
@@ -1043,3 +1065,34 @@ GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.multim
 ```
 
 VS インデックスは UC 上では `TABLE` と同じ GRANT 構文で権限付与できる (`GRANT SELECT ON TABLE <index_name>`)。
+
+---
+
+### 問題 16: サムネイル・動画が表示/再生できない (UC Volume への READ VOLUME 権限不足)
+
+**現象**  
+検索結果カードに "No Thumbnail" が表示される。動画ストリーミングやクリップ作成も失敗する。テーブルへの SELECT 権限は付与済みにもかかわらず発生する。
+
+**原因**  
+Unity Catalog の **Volume は Delta Table とは独立した UC オブジェクト**であり、`GRANT SELECT ON TABLE` の権限はVolumeには適用されない。SP がファイル API (`/api/2.0/fs/files/Volumes/...`) で Volume 内のファイルを読み書きするには、**Volume への `READ VOLUME` / `WRITE VOLUME`** が別途必要。
+
+```
+必要な権限の全体像 (Volume 関連):
+  thumbnails Volume → READ VOLUME  (サムネイル表示)
+  videos Volume     → READ VOLUME  (動画ストリーミング・クリップ切り出し)
+  clips Volume      → READ VOLUME + WRITE VOLUME  (クリップDL・アップロード)
+```
+
+アプリ側で Volume アクセスに失敗しても例外は `404` として握り潰されるため、ブラウザには "No Thumbnail" や "動画が見つかりません" として表示される。
+
+**解決策**  
+各 Volume に権限を付与する:
+
+```sql
+GRANT READ VOLUME  ON VOLUME classic_stable_ytcy_catalog.multimodal_video_search.thumbnails TO `<app_sp_id>`;
+GRANT READ VOLUME  ON VOLUME classic_stable_ytcy_catalog.multimodal_video_search.videos     TO `<app_sp_id>`;
+GRANT READ VOLUME  ON VOLUME classic_stable_ytcy_catalog.multimodal_video_search.clips      TO `<app_sp_id>`;
+GRANT WRITE VOLUME ON VOLUME classic_stable_ytcy_catalog.multimodal_video_search.clips      TO `<app_sp_id>`;
+```
+
+> **補足**: Volume 権限はアプリの再デプロイなしに即時反映される。
