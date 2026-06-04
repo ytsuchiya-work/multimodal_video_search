@@ -121,13 +121,17 @@ def create_or_sync_index(index_name, source_table, embedding_col, embedding_dim,
         }
         resp = requests.post(f"{base_url}/indexes", headers=headers, json=create_body)
         print(f"  作成レスポンス: {resp.status_code} - {resp.text[:200]}")
-    else:
-        print(f"Index既存、同期トリガー: {index_name}")
-        resp = requests.post(
-            f"{base_url}/indexes/{index_name}/sync",
-            headers=headers,
-        )
-        print(f"  同期レスポンス: {resp.status_code} - {resp.text[:100]}")
+        # Wait for index to exist before triggering sync
+        for i in range(30):
+            r = requests.get(f"{base_url}/indexes/{index_name}", headers=headers)
+            if r.status_code == 200:
+                break
+            time.sleep(5)
+
+    # Always trigger sync (TRIGGERED pipeline doesn't auto-sync on creation)
+    print(f"同期トリガー: {index_name}")
+    resp = requests.post(f"{base_url}/indexes/{index_name}/sync", headers=headers)
+    print(f"  同期レスポンス: {resp.status_code} - {resp.text[:100]}")
 
     # 同期完了まで待機
     for i in range(120):
