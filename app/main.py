@@ -230,38 +230,39 @@ def _run_multimodal_search(task_id: str, query: str, num_results: int):
                    "end_time", "transcript", "thumbnail_path"]
 
         def query_text_index():
-            r = http_requests.post(
-                f"{DATABRICKS_HOST}/api/2.0/vector-search/indexes/{MM_TEXT_INDEX}/query",
-                headers=get_db_headers(),
-                json={"columns": vs_cols, "query_vector": text_embedding, "num_results": num_results * 2},
+            return w.vector_search_indexes.query_index(
+                index_name=MM_TEXT_INDEX,
+                columns=vs_cols,
+                query_vector=text_embedding,
+                num_results=num_results * 2,
             )
-            r.raise_for_status()
-            return r
 
         def query_image_index():
-            r = http_requests.post(
-                f"{DATABRICKS_HOST}/api/2.0/vector-search/indexes/{MM_IMAGE_INDEX}/query",
-                headers=get_db_headers(),
-                json={"columns": vs_cols, "query_vector": clip_embedding, "num_results": num_results * 2},
+            return w.vector_search_indexes.query_index(
+                index_name=MM_IMAGE_INDEX,
+                columns=vs_cols,
+                query_vector=clip_embedding,
+                num_results=num_results * 2,
             )
-            r.raise_for_status()
-            return r
 
         # Run both VS queries in parallel
         with ThreadPoolExecutor(max_workers=2) as executor:
             f_text_vs = executor.submit(query_text_index)
             f_image_vs = executor.submit(query_image_index)
-            text_resp = f_text_vs.result()
-            image_resp = f_image_vs.result()
+            text_result = f_text_vs.result()
+            image_result = f_image_vs.result()
+
+        text_rows = (text_result.result.data_array or []) if text_result.result else []
+        image_rows = (image_result.result.data_array or []) if image_result.result else []
 
         text_scores, text_meta = {}, {}
-        for row in text_resp.json().get("result", {}).get("data_array", []):
+        for row in text_rows:
             sid = row[0]
             text_scores[sid] = float(row[7]) if len(row) > 7 and row[7] is not None else 0.0
             text_meta[sid] = row
 
         image_scores, image_meta = {}, {}
-        for row in image_resp.json().get("result", {}).get("data_array", []):
+        for row in image_rows:
             sid = row[0]
             image_scores[sid] = float(row[7]) if len(row) > 7 and row[7] is not None else 0.0
             image_meta[sid] = row
