@@ -336,7 +336,19 @@ resources:
   - name: vector-search-endpoint
     vector_search_endpoint:
       name: video-search-endpoint
-      permission: CAN_USE
+      permission: CAN_MANAGE        # CAN_USE ではインデックスクエリに 403 が発生する (問題13参照)
+  - name: cosmos-encoder
+    serving_endpoint:
+      name: cosmos-video-encoder
+      permission: CAN_QUERY
+  - name: text-embedder
+    serving_endpoint:
+      name: multilingual-e5-embedder
+      permission: CAN_QUERY
+  - name: clip-encoder-resource
+    serving_endpoint:
+      name: clip-encoder
+      permission: CAN_QUERY
 ```
 
 ## デプロイ時のトラブルシューティング記録
@@ -755,8 +767,199 @@ done
 
 | エラーメッセージ | 原因 | 対処 |
 |--------------|------|------|
-| `403 Forbidden for url: .../vector-search/indexes/.../query` | SP が Vector Search エンドポイントの CAN_USE 権限なし、または Unity Catalog (USE CATALOG / USE SCHEMA / SELECT) 権限なし | 手順 1 を実施 |
+| `403 Forbidden for url: .../vector-search/indexes/.../query` | SP が VS エンドポイントの CAN_MANAGE 権限なし、または UC (USE CATALOG / USE SCHEMA / SELECT) 権限なし | 手順 1 を実施 (CAN_MANAGE が必要、CAN_USE では不足) |
 | `403 Forbidden for url: .../serving-endpoints/.../invocations` | SP が Model Serving endpoint の CAN_QUERY 権限なし | 手順 2 を実施 |
 | `404 Not Found for url: .../vector-search/indexes/.../query` | Vector Search インデックスが未作成 | Step 5 (Vector Search Index 作成) を実施 |
 | `os.path.exists("/Volumes/...")` が常に `False` | `data_security_mode: NONE` クラスタは UC Volume の FUSE マウントを提供しない | パイプラインに `job_cluster` (SINGLE_USER) を使用する |
 | `Spark version ... does not support Table Access Control` | GPU ML ランタイムは `USER_ISOLATION` モード非対応 | `SINGLE_USER` + job_cluster で対処 |
+
+---
+
+### 問題 11: Vector Search TRIGGERED インデックスが作成直後に空のまま (自動同期されない)
+
+**現象**  
+`02_setup_vector_search.py` でインデックスを作成した直後に検索すると 0 件が返る。Delta Table にはデータが存在しており、インデックスのステータスは `ONLINE` になっているにもかかわらず、`data_array` が常に空。
+
+**原因**  
+Vector Search の `TRIGGERED` パイプライン型インデックスは、**作成時に自動同期しない**。インデックスを作成するだけでは Delta Table のデータが読み込まれず、明示的に `/sync` エンドポイントを呼び出すまでインデックスは空のまま。
+
+> `CONTINUOUS` パイプライン型は作成後に自動で同期を開始するが、`TRIGGERED` 型は明示的なトリガーが必要。
+
+**解決策**  
+インデックス作成後 (新規・既存どちらも) に必ず `/sync` を呼び出す。新規作成後はインデックスが存在することを確認してから `/sync` を呼び出す。
+
+```python
+if index_name not in existing_indexes:
+    # インデックス作成 API 呼び出し
+    requests.post(f"{base_url}/indexes", ...)
+    # 作成完了を待機 (存在確認)
+    for i in range(30):
+        r = requests.get(f"{base_url}/indexes/{index_name}", headers=headers)
+        if r.status_code == 200:
+            break
+        time.sleep(5)
+
+# 新規・既存に関わらず必ず同期トリガー (TRIGGERED は作成後に自動同期しない)
+resp = requests.post(f"{base_url}/indexes/{index_name}/sync", headers=headers)
+print(f"同期トリガー: {resp.status_code}")
+```
+
+---
+
+### 問題 12: Databricks Apps の 60 秒プロキシタイムアウトで検索が失敗する
+
+**現象**  
+GPU エンドポイント (scale_to_zero) へのクエリに cold start が発生すると、検索に 60 秒以上かかる。この場合、フロントエンドが以下のエラーを表示する:
+
+```
+検索エラー:
+```
+
+(エラーメッセージが空) ブラウザコンソールには `net::ERR_INCOMPLETE_CHUNKED_ENCODING` または接続リセットが記録される。
+
+**原因**  
+Databricks Apps のリバースプロキシが **HTTP リクエストを 60 秒で強制切断する**。GPU コールドスタートに 2〜5 分かかることがあるため、同期 HTTP リクエストでは確実にタイムアウトする。また HTTP/2 では `statusText` が空文字になるため、フロントエンドのエラーメッセージが空になる。
+
+**解決策**  
+FastAPI の `BackgroundTasks` を使ったポーリング方式に変更する:
+
+1. `POST /api/search` → バックグラウンドタスクを登録して即座に `{task_id}` を返す (< 1秒)
+2. フロントエンドが `GET /api/search/result/{task_id}` を 2 秒間隔でポーリング
+3. タスク完了時に結果を返す
+
+```python
+# Backend (FastAPI)
+search_tasks: dict = {}
+
+@app.post("/api/search")
+async def search_videos(request: SearchRequest, background_tasks: BackgroundTasks):
+    task_id = str(uuid.uuid4())
+    search_tasks[task_id] = {"status": "pending"}
+    background_tasks.add_task(_run_cosmos_search, task_id, request.query, request.num_results)
+    return {"task_id": task_id, "status": "pending"}
+
+@app.get("/api/search/result/{task_id}")
+async def get_search_result(task_id: str):
+    result = search_tasks.get(task_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return result
+```
+
+```javascript
+// Frontend: ポーリングループ
+const { task_id } = await fetch("/api/search", {method:"POST",...}).then(r=>r.json());
+for (let i = 0; i < 150; i++) {          // 最大 5 分
+    await new Promise(r => setTimeout(r, 2000));
+    const data = await fetch(`/api/search/result/${task_id}`).then(r=>r.json());
+    if (data.status === "done") { setResults(data.results); return; }
+    if (data.status === "error") { setError(data.error); return; }
+}
+```
+
+> **補足**: GPU コールドスタートの進行状況をユーザーに伝えるため、ポーリング経過時間に応じて「接続中...」→「embedding計算中...」→「GPUコールドスタート中...」と段階的なメッセージを表示するとよい。
+
+---
+
+### 問題 13: Vector Search インデックスクエリに `CAN_USE` では 403、`CAN_MANAGE` が必要
+
+**現象**  
+`app.yaml` で VS エンドポイントを `permission: CAN_USE` で宣言し、SP に `CAN_USE` を手動付与しても、インデックスクエリで 403 が発生し続ける。
+
+```
+403 Client Error: Forbidden for url:
+https://.../api/2.0/vector-search/indexes/.../multimodal_text_index/query
+```
+
+同じ操作を人間ユーザーのトークンで実行すると成功する。
+
+**原因**  
+Databricks Vector Search のインデックスクエリ (`/indexes/.../query`) には、VS エンドポイントへの **`CAN_MANAGE`** 権限が必要。`CAN_USE` ではクエリが拒否される (ドキュメントでは `CAN_USE` で十分とも読めるが、実際には不足する)。
+
+さらに、Databricks SDK (`WorkspaceClient`) を使ったクエリは認証トークンの伝播方法が REST 直接呼び出しと異なるため、SDK 経由の方が App SP の認証に成功しやすい。
+
+**解決策**
+
+1. `app.yaml` の VS エンドポイントを `CAN_MANAGE` に変更:
+
+```yaml
+- name: vector-search-endpoint
+  vector_search_endpoint:
+    name: video-search-endpoint
+    permission: CAN_MANAGE    # CAN_USE では 403 が発生する
+```
+
+2. VS インデックスクエリを REST 直接呼び出しから Databricks SDK に切り替える:
+
+```python
+# NG: REST 直接呼び出し (SP 認証で 403 が発生しやすい)
+resp = requests.post(
+    f"{DATABRICKS_HOST}/api/2.0/vector-search/indexes/{index_name}/query",
+    headers=get_db_headers(),
+    json={"columns": [...], "query_vector": embedding, "num_results": n},
+)
+
+# OK: Databricks SDK 経由
+result = w.vector_search_indexes.query_index(
+    index_name=index_name,
+    columns=[...],
+    query_vector=embedding,
+    num_results=n,
+)
+rows = (result.result.data_array or []) if result.result else []
+```
+
+3. SP への `CAN_MANAGE` を手動付与:
+
+```bash
+ENDPOINT_ID=$(databricks --profile fevm-classic-stable-ytcy api get \
+  "/api/2.0/vector-search/endpoints/video-search-endpoint" \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+
+databricks --profile fevm-classic-stable-ytcy api patch \
+  "/api/2.0/permissions/vector-search-endpoints/${ENDPOINT_ID}" --json '{
+  "access_control_list": [{
+    "service_principal_name": "<app_sp_application_id>",
+    "permission_level": "CAN_MANAGE"
+  }]
+}'
+```
+
+---
+
+### 問題 14: Cosmos テキスト embedding で `got multiple values for keyword argument 'padding'`
+
+**現象**  
+Cosmos検索でクエリを送信すると以下のエラーが発生する:
+
+```
+400 Bad Request: Encountered an unexpected error while evaluating the model.
+TypeError: got multiple values for keyword argument 'padding'
+  at preprocessing_embed1.py, line 75, in __call__
+      tokenized = self.tokenizer(...)
+```
+
+**原因**  
+`CosmosVideoEncoder._embed_text` 内で `self.processor(text=[text], return_tensors="pt", padding=True)` を呼び出していたが、Cosmos-Embed1 のカスタムプロセッサ `preprocessing_embed1.py` は `__call__` 内部で `padding` キーワードを既にトークナイザーに渡している。そこへ呼び出し側からも `padding=True` を渡すため、**同じキーワード引数が二重に渡されて TypeError** が発生する。
+
+```python
+# NG: padding=True を渡すと preprocessing_embed1.py 内部の padding と競合
+text_inputs = self.processor(text=[text], return_tensors="pt", padding=True)
+
+# OK: padding は processor 内部に任せる
+text_inputs = self.processor(text=[text], return_tensors="pt")
+```
+
+**解決策**  
+`notebooks/03b_deploy_cosmos_video_encoder.py` の `_embed_text` メソッドから `padding=True` を削除し、cosmos-video-encoder エンドポイントを再デプロイする。
+
+```python
+def _embed_text(self, text):
+    import torch
+    text_inputs = self.processor(text=[text], return_tensors="pt").to(self.device)  # padding=True を削除
+    with torch.no_grad():
+        text_emb = self.model.get_text_embeddings(**text_inputs)
+    ...
+```
+
+再デプロイは `03b_deploy_cosmos_video_encoder.py` の Cell 8 以降を再実行すれば新バージョンが登録されてエンドポイントが自動更新される。
