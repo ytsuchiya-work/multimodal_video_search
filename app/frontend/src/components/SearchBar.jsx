@@ -58,7 +58,7 @@ const SUGGESTIONS = [
   "Unity Catalogの紹介",
 ];
 
-export default function SearchBar({ onSearch, loading }) {
+export default function SearchBar({ onSearch, loading, loadingMsg }) {
   const [value, setValue] = useState("");
 
   const handleSubmit = (e) => {
@@ -89,7 +89,7 @@ export default function SearchBar({ onSearch, loading }) {
           type="submit"
           disabled={loading}
         >
-          {loading ? "検索中..." : "検索"}
+          {loading ? (loadingMsg || "検索中...") : "検索"}
         </button>
       </form>
       <div style={styles.suggestions}>
