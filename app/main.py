@@ -67,24 +67,28 @@ async def health():
 
 @app.get("/api/cluster/status")
 async def cluster_status():
-    """cosmos-video-encoderサービングエンドポイントの状態を返す"""
+    """全サービングエンドポイントの状態を返す（一つでもREADYなら全体RUNNING）"""
     try:
-        resp = http_requests.get(
-            f"{DATABRICKS_HOST}/api/2.0/serving-endpoints/{COSMOS_ENDPOINT_NAME}",
-            headers=get_db_headers(),
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        state = data.get("state", {})
-        ready = state.get("ready", "UNKNOWN")
+        endpoints = [COSMOS_ENDPOINT_NAME, TEXT_EMBED_ENDPOINT_NAME, CLIP_ENDPOINT_NAME]
+        states = {}
+        for ep in endpoints:
+            resp = http_requests.get(
+                f"{DATABRICKS_HOST}/api/2.0/serving-endpoints/{ep}",
+                headers=get_db_headers(),
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                s = resp.json().get("state", {})
+                states[ep] = s.get("ready", "UNKNOWN")
+        all_ready = all(v == "READY" for v in states.values())
         return {
-            "state": "RUNNING" if ready == "READY" else ready,
-            "cluster_name": COSMOS_ENDPOINT_NAME,
-            "state_message": "Model Serving endpoint (auto-scales on demand)",
+            "state": "RUNNING" if all_ready else "STARTING",
+            "cluster_name": ", ".join(endpoints),
+            "state_message": str(states),
         }
     except Exception as e:
         logger.error(f"Endpoint status error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"state": "UNKNOWN", "cluster_name": "endpoints", "state_message": str(e)}
 
 
 @app.post("/api/cluster/start")
@@ -293,13 +297,16 @@ MM_TEXT_INDEX = f"{CATALOG}.{SCHEMA}.multimodal_text_index"
 MM_IMAGE_INDEX = f"{CATALOG}.{SCHEMA}.multimodal_image_index"
 
 
+_ENDPOINT_TIMEOUT = 300  # GPU cold-start can take 3-5 min after scale-to-zero
+
+
 def get_text_embedding(text: str) -> list:
     """cosmos-video-encoder serving endpointでテキストembeddingを計算 (768次元)"""
     resp = http_requests.post(
         f"{DATABRICKS_HOST}/serving-endpoints/{COSMOS_ENDPOINT_NAME}/invocations",
         headers=get_db_headers(),
         json={"dataframe_records": [{"type": "text", "content": text}]},
-        timeout=60,
+        timeout=_ENDPOINT_TIMEOUT,
     )
     resp.raise_for_status()
     result = resp.json()
@@ -313,14 +320,14 @@ def get_multimodal_embedding(text: str, embed_type: str) -> list:
             f"{DATABRICKS_HOST}/serving-endpoints/{TEXT_EMBED_ENDPOINT_NAME}/invocations",
             headers=get_db_headers(),
             json={"dataframe_records": [{"text": text}]},
-            timeout=60,
+            timeout=_ENDPOINT_TIMEOUT,
         )
     elif embed_type == "clip":
         resp = http_requests.post(
             f"{DATABRICKS_HOST}/serving-endpoints/{CLIP_ENDPOINT_NAME}/invocations",
             headers=get_db_headers(),
             json={"dataframe_records": [{"type": "text", "content": text}]},
-            timeout=60,
+            timeout=_ENDPOINT_TIMEOUT,
         )
     else:
         raise ValueError(f"Unknown embed_type: {embed_type}")

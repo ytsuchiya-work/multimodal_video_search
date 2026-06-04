@@ -260,17 +260,26 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: searchQuery, num_results: 12 }),
+        signal: AbortSignal.timeout(310000),
       });
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `検索エラー: ${res.statusText}`);
+        const detail = errData.detail || `検索エラー: ${res.statusText}`;
+        if (res.status === 503) {
+          throw new Error("🔄 GPUエンドポイントが起動中です（初回リクエスト時は2〜3分かかります）。しばらく待ってから再度お試しください。");
+        }
+        throw new Error(detail);
       }
 
       const data = await res.json();
       setResults(data.results || []);
     } catch (e) {
-      setError(e.message);
+      if (e.name === "TimeoutError" || e.name === "AbortError" || (e.message && e.message.includes("timed out"))) {
+        setError("🔄 GPUエンドポイントが起動中です（スケールゼロからの復帰に2〜3分かかります）。しばらく待ってから再度お試しください。");
+      } else {
+        setError(e.message);
+      }
       setResults([]);
     } finally {
       setLoading(false);
