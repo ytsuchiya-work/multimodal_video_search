@@ -1,4 +1,5 @@
 # Databricks notebook source
+# DBTITLE 1,Cell 1
 # MAGIC %md
 # MAGIC # Model Serving: Cosmos ビデオエンコーダーデプロイ
 # MAGIC
@@ -7,6 +8,20 @@
 # MAGIC
 # MAGIC **入力**: base64 エンコードされた JPEG フレーム画像のリスト (8フレーム/セグメント)
 # MAGIC **出力**: 768次元ビデオ embedding
+# MAGIC
+# MAGIC ---
+# MAGIC
+# MAGIC ### デプロイ時の修正履歴
+# MAGIC
+# MAGIC | セル | 問題 | 修正内容 |
+# MAGIC |------|------|----------|
+# MAGIC | Cell 8 | Q-Former/BERT 層が float16 非対応 (`expected Float but found Half`) | `self.dtype` を `torch.float32` に固定 |
+# MAGIC | Cell 10 | `transformers 5.x` で `find_pruneable_heads_and_indices` が削除済み | `transformers>=4.40.0,<5.0.0` にバージョン制限 |
+# MAGIC | Cell 10 | `pandas` が pip\_requirements に未記載 | `"pandas"` を追加 |
+# MAGIC | Cell 10 | `torch`/`torchvision` が GPU コンテナのプリインストール版と競合し pip 全体が失敗 | pip\_requirements から削除 |
+# MAGIC | Cell 10 | `.cache/huggingface/` メタデータが不要な WSFS ルックアップを誘発 | `shutil.rmtree` で除外してからログ |
+# MAGIC | Cell 14 | 旧バージョンが READY のまま新バージョン反映前に break | `config_update == "NOT_UPDATING"` 条件を追加 |
+# MAGIC | Cell 16 | invocations URL に `/api/2.0/` プレフィックス不要 | `https://{host}/serving-endpoints/{name}/invocations` に修正 |
 
 # COMMAND ----------
 
@@ -68,6 +83,7 @@ else:
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 8
 class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
     """Cosmos-Embed1-448p のビデオエンコーダー。
     入力: base64 JPEG フレームのリスト (1セグメント = 8フレーム)
@@ -79,8 +95,8 @@ class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
         from transformers import AutoProcessor, AutoModel
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # float16 instead of bfloat16: T4 GPU (compute capability 7.5) does not support bfloat16
-        self.dtype = torch.float16 if self.device == "cuda" else torch.float32
+        # float32 for stability: Q-Former/BERT layers raise "expected Float but found Half" with float16
+        self.dtype = torch.float32
 
         model_path = context.artifacts["model_dir"]
         # torch_dtype at load time avoids double-memory (float32 load + float16 convert)
@@ -147,20 +163,20 @@ class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 10
 input_schema = Schema([ColSpec("string", "frames")])  # JSON配列文字列 or array
 output_schema = Schema([TensorSpec(np.dtype(np.float32), (-1, 768), "embedding")])
 signature = ModelSignature(inputs=input_schema, outputs=output_schema)
 
 pip_requirements = [
-    "transformers>=4.40.0",
+    "transformers>=4.40.0,<5.0.0",  # model uses find_pruneable_heads_and_indices (removed in 5.x)
     "accelerate>=0.20.0",  # required for low_cpu_mem_usage and large model loading
     "safetensors>=0.3.0",  # model uses safetensors shards
     "einops",
-    "torch>=2.0.0",
-    "torchvision",
     "pillow",
     "numpy",
     "huggingface_hub>=0.19.0",
+    "pandas",
 ]
 
 def _build_input_example():
@@ -175,6 +191,13 @@ def _build_input_example():
         img.save(buf, format="JPEG", quality=85)
         frames.append(base64.b64encode(buf.getvalue()).decode())
     return {"frames": [frames]}
+
+# Remove .cache dir (snapshot_download metadata - not needed for inference)
+import shutil
+_cache_path = os.path.join(LOCAL_MODEL_DIR, ".cache")
+if os.path.isdir(_cache_path):
+    shutil.rmtree(_cache_path)
+    print(f".cache 削除済み: {_cache_path}")
 
 with mlflow.start_run(run_name="cosmos-video-encoder-deploy"):
     model_info = mlflow.pyfunc.log_model(
@@ -242,14 +265,23 @@ print(f"Response: {resp.status_code} - {resp.text[:200]}")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 14
 for i in range(120):
     resp = requests.get(f"{endpoint_url}/{SERVING_ENDPOINT_NAME}", headers=headers)
     state = resp.json().get("state", {})
-    if state.get("ready") == "READY":
+    if state.get("ready") == "READY" and state.get("config_update") == "NOT_UPDATING":
         print(f"Endpoint READY: {SERVING_ENDPOINT_NAME}")
         break
     if state.get("config_update") == "UPDATE_FAILED":
-        raise Exception("デプロイ失敗")
+        # Include failure details from pending_config for diagnostics
+        detail = ""
+        pending = resp.json().get("pending_config", {})
+        for entity in pending.get("served_entities", []):
+            msg = entity.get("state", {}).get("deployment_state_message", "")
+            if msg:
+                detail = msg
+                break
+        raise Exception(f"デプロイ失敗: {detail or 'see service logs'}")
     print(f"  待機中... ({i+1}/120) - {state.get('ready')}")
     time.sleep(15)
 
@@ -260,6 +292,7 @@ for i in range(120):
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 16
 import base64, io
 from PIL import Image
 import numpy as np
@@ -272,8 +305,10 @@ for _ in range(8):
     dummy_img.save(buf, format="JPEG", quality=85)
     dummy_frames.append(base64.b64encode(buf.getvalue()).decode())
 
+# Invocations API uses /serving-endpoints/ (not /api/2.0/serving-endpoints/)
+scoring_url = f"https://{host}/serving-endpoints/{SERVING_ENDPOINT_NAME}/invocations"
 resp = requests.post(
-    f"{endpoint_url}/{SERVING_ENDPOINT_NAME}/invocations",
+    scoring_url,
     headers=headers,
     json={"dataframe_records": [{"frames": dummy_frames}]},
 )

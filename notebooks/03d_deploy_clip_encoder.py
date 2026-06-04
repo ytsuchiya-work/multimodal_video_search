@@ -170,3 +170,4 @@ if "predictions" in result:
     print(f"テキストテスト成功: embedding 次元 = {len(emb)}")
 else:
     print(f"レスポンス: {json.dumps(result)[:200]}")
+

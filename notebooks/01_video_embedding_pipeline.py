@@ -352,3 +352,4 @@ videos_with_data = spark.table(TABLE_NAME).select("video_id").distinct().count()
 print(f"処理済み動画数: {videos_with_data}")
 print(f"embedding次元: {len(emb)}")
 print("NOTEBOOK 01 VERIFIED OK")
+
