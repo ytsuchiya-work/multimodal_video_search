@@ -28,7 +28,7 @@ resources:
   - name: vector-search-endpoint
     vector_search_endpoint:
       name: video-search-endpoint
-      permission: CAN_USE
+      permission: CAN_MANAGE
   - name: cosmos-encoder
     serving_endpoint:
       name: cosmos-video-encoder

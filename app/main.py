@@ -218,32 +218,41 @@ def _run_cosmos_search(task_id: str, query: str, num_results: int):
 
 def _run_multimodal_search(task_id: str, query: str, num_results: int):
     try:
-        text_embedding = get_multimodal_embedding(query, "text")
-        clip_embedding = get_multimodal_embedding(query, "clip")
+        # Run E5 and CLIP embeddings in parallel to cut latency in half
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            f_text = executor.submit(get_multimodal_embedding, query, "text")
+            f_clip = executor.submit(get_multimodal_embedding, query, "clip")
+            text_embedding = f_text.result()
+            clip_embedding = f_clip.result()
 
-        text_resp = http_requests.post(
-            f"{DATABRICKS_HOST}/api/2.0/vector-search/indexes/{MM_TEXT_INDEX}/query",
-            headers=get_db_headers(),
-            json={
-                "columns": ["segment_id", "title", "youtube_url", "start_time",
-                            "end_time", "transcript", "thumbnail_path"],
-                "query_vector": text_embedding,
-                "num_results": num_results * 2,
-            },
-        )
-        text_resp.raise_for_status()
+        vs_cols = ["segment_id", "title", "youtube_url", "start_time",
+                   "end_time", "transcript", "thumbnail_path"]
 
-        image_resp = http_requests.post(
-            f"{DATABRICKS_HOST}/api/2.0/vector-search/indexes/{MM_IMAGE_INDEX}/query",
-            headers=get_db_headers(),
-            json={
-                "columns": ["segment_id", "title", "youtube_url", "start_time",
-                            "end_time", "transcript", "thumbnail_path"],
-                "query_vector": clip_embedding,
-                "num_results": num_results * 2,
-            },
-        )
-        image_resp.raise_for_status()
+        def query_text_index():
+            r = http_requests.post(
+                f"{DATABRICKS_HOST}/api/2.0/vector-search/indexes/{MM_TEXT_INDEX}/query",
+                headers=get_db_headers(),
+                json={"columns": vs_cols, "query_vector": text_embedding, "num_results": num_results * 2},
+            )
+            r.raise_for_status()
+            return r
+
+        def query_image_index():
+            r = http_requests.post(
+                f"{DATABRICKS_HOST}/api/2.0/vector-search/indexes/{MM_IMAGE_INDEX}/query",
+                headers=get_db_headers(),
+                json={"columns": vs_cols, "query_vector": clip_embedding, "num_results": num_results * 2},
+            )
+            r.raise_for_status()
+            return r
+
+        # Run both VS queries in parallel
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            f_text_vs = executor.submit(query_text_index)
+            f_image_vs = executor.submit(query_image_index)
+            text_resp = f_text_vs.result()
+            image_resp = f_image_vs.result()
 
         text_scores, text_meta = {}, {}
         for row in text_resp.json().get("result", {}).get("data_array", []):
