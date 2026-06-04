@@ -709,41 +709,44 @@ Databricks Apps の Service Principal は、デフォルトでは各リソース
 
 > **補足**: アプリの SP の application_id は `databricks apps get <app_name>` の `service_principal_client_id` フィールドで確認できる。
 
-### 1. Vector Search エンドポイントへの CAN_USE 権限 + Unity Catalog 権限
+### 1. Vector Search エンドポイント + Unity Catalog 権限 (完全版)
 
-SP が Vector Search インデックスをクエリするには、エンドポイントへの `CAN_USE` 権限に加え、Unity Catalog のカタログ・スキーマ・テーブルへのアクセス権が必要。`app.yaml` の `resources` 宣言だけでは自動付与されない。
+SP が Vector Search インデックスをクエリするには以下の **7つ** の権限が全て必要。`app.yaml` の `resources` 宣言だけでは自動付与されない。
+
+> **重要**: Vector Search の Delta Sync インデックスは Unity Catalog にオブジェクトとして登録される。**ソーステーブルへの SELECT だけでは不足**で、インデックスオブジェクト自体にも `GRANT SELECT` が必要。
 
 ```bash
-# (a) VS エンドポイントへの CAN_USE
+SP_ID="<app_sp_application_id>"
+WH_ID="<warehouse_id>"
+
+# (a) VS エンドポイントへの CAN_MANAGE (CAN_USE では 403 が発生する)
 ENDPOINT_ID=$(databricks --profile fevm-classic-stable-ytcy api get \
   "/api/2.0/vector-search/endpoints/video-search-endpoint" \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 
 databricks --profile fevm-classic-stable-ytcy api patch \
-  "/api/2.0/permissions/vector-search-endpoints/${ENDPOINT_ID}" --json '{
-  "access_control_list": [{
-    "service_principal_name": "<app_sp_application_id>",
-    "permission_level": "CAN_USE"
+  "/api/2.0/permissions/vector-search-endpoints/${ENDPOINT_ID}" --json "{
+  \"access_control_list\": [{
+    \"service_principal_name\": \"${SP_ID}\",
+    \"permission_level\": \"CAN_MANAGE\"
   }]
-}'
+}"
 
 # (b) Unity Catalog 権限 (SQL Warehouse 経由で実行)
-databricks --profile fevm-classic-stable-ytcy api post "/api/2.0/sql/statements" --json '{
-  "warehouse_id": "<warehouse_id>",
-  "statement": "GRANT USE CATALOG ON CATALOG classic_stable_ytcy_catalog TO `<app_sp_application_id>`"
-}'
-databricks --profile fevm-classic-stable-ytcy api post "/api/2.0/sql/statements" --json '{
-  "warehouse_id": "<warehouse_id>",
-  "statement": "GRANT USE SCHEMA ON SCHEMA classic_stable_ytcy_catalog.multimodal_video_search TO `<app_sp_application_id>`"
-}'
-databricks --profile fevm-classic-stable-ytcy api post "/api/2.0/sql/statements" --json '{
-  "warehouse_id": "<warehouse_id>",
-  "statement": "GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.video_embeddings TO `<app_sp_application_id>`"
-}'
-databricks --profile fevm-classic-stable-ytcy api post "/api/2.0/sql/statements" --json '{
-  "warehouse_id": "<warehouse_id>",
-  "statement": "GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.multimodal_segments TO `<app_sp_application_id>`"
-}'
+# ソーステーブル + VS インデックスオブジェクトの両方に SELECT が必要
+for STMT in \
+  "GRANT USE CATALOG ON CATALOG classic_stable_ytcy_catalog TO \`${SP_ID}\`" \
+  "GRANT USE SCHEMA ON SCHEMA classic_stable_ytcy_catalog.multimodal_video_search TO \`${SP_ID}\`" \
+  "GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.video_embeddings TO \`${SP_ID}\`" \
+  "GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.multimodal_segments TO \`${SP_ID}\`" \
+  "GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.video_embeddings_index TO \`${SP_ID}\`" \
+  "GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.multimodal_text_index TO \`${SP_ID}\`" \
+  "GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.multimodal_image_index TO \`${SP_ID}\`"
+do
+  curl -s -X POST "https://fevm-classic-stable-ytcy.cloud.databricks.com/api/2.0/sql/statements" \
+    -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+    -d "{\"warehouse_id\": \"${WH_ID}\", \"statement\": \"${STMT}\", \"wait_timeout\": \"30s\"}"
+done
 ```
 
 ### 2. Model Serving エンドポイントへの CAN_QUERY 権限
@@ -963,3 +966,41 @@ def _embed_text(self, text):
 ```
 
 再デプロイは `03b_deploy_cosmos_video_encoder.py` の Cell 8 以降を再実行すれば新バージョンが登録されてエンドポイントが自動更新される。
+
+---
+
+### 問題 15: Databricks SDK の `query_index()` で `Insufficient permissions for UC entity <index_name>`
+
+**現象**  
+`w.vector_search_indexes.query_index()` (Databricks SDK) でマルチモーダル検索を実行すると以下のエラーが発生する:
+
+```
+Insufficient permissions for UC entity
+classic_stable_ytcy_catalog.multimodal_video_search.multimodal_text_index.
+Config: ..., auth_type=oauth-m2m, client_id=<app_sp_id>
+```
+
+ソーステーブル (`multimodal_segments`) への SELECT は付与済み、VS エンドポイントへの CAN_MANAGE も付与済みにもかかわらず発生する。
+
+**原因**  
+Databricks Vector Search の Delta Sync インデックスは **Unity Catalog に独立したオブジェクトとして登録される**。SDK の `query_index()` はこの UC オブジェクトに対して権限チェックを行うため、ソーステーブルとは別に **インデックスオブジェクト自体への `SELECT`** が必要となる。
+
+```
+必要な権限の全体像:
+  VS エンドポイント  →  CAN_MANAGE (CAN_USE では不足)
+  UC カタログ        →  USE CATALOG
+  UC スキーマ        →  USE SCHEMA
+  ソーステーブル     →  SELECT (multimodal_segments, video_embeddings)
+  VS インデックス    →  SELECT (← これが抜けると "Insufficient permissions for UC entity")
+```
+
+**解決策**  
+3つの VS インデックスオブジェクトに `GRANT SELECT` を付与する:
+
+```sql
+GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.video_embeddings_index   TO `<app_sp_id>`;
+GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.multimodal_text_index    TO `<app_sp_id>`;
+GRANT SELECT ON TABLE classic_stable_ytcy_catalog.multimodal_video_search.multimodal_image_index   TO `<app_sp_id>`;
+```
+
+VS インデックスは UC 上では `TABLE` と同じ GRANT 構文で権限付与できる (`GRANT SELECT ON TABLE <index_name>`)。
