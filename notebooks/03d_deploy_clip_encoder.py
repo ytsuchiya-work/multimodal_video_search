@@ -10,9 +10,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install mlflow transformers pillow
-# MAGIC # torch/torchvision は GPU ML runtime (15.4.x-gpu-ml-scala2.12) に同梱済み
-# MAGIC dbutils.library.restartPython()
+# All required packages (mlflow, transformers, pillow, torch) are pre-installed in GPU ML runtime 15.4
 
 # COMMAND ----------
 
@@ -172,3 +170,4 @@ if "predictions" in result:
     print(f"テキストテスト成功: embedding 次元 = {len(emb)}")
 else:
     print(f"レスポンス: {json.dumps(result)[:200]}")
+

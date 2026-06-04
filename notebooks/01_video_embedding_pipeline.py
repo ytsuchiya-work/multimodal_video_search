@@ -8,7 +8,8 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install decord pillow
+# MAGIC %pip install decord pillow einops
+# MAGIC # torch/transformers/accelerate/safetensors/huggingface_hub are pre-installed in GPU ML runtime 15.4
 
 # COMMAND ----------
 
@@ -17,11 +18,8 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import os
-import base64
 import io
-import json
 import numpy as np
-import requests
 from datetime import datetime
 
 from decord import VideoReader, cpu
@@ -127,18 +125,46 @@ print(f"\n準備完了: {len(downloaded_videos)}/{len(video_list)}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Model Serving エンドポイント設定
+# MAGIC ## Cosmos モデル直接ロード
+# MAGIC
+# MAGIC cosmos-video-encoder Model Serving は GPU ML ランタイムの依存関係との非互換により
+# MAGIC 一貫して DEPLOYMENT_FAILED するため、パイプラインクラスター上で直接モデルをロードする。
+# MAGIC GPU ML ランタイム 15.4 には torch/transformers/accelerate/safetensors が
+# MAGIC プリインストールされており、serving 環境より安定している。
 
 # COMMAND ----------
 
-COSMOS_VIDEO_ENDPOINT = "cosmos-video-encoder"
-HOST = spark.conf.get("spark.databricks.workspaceUrl")
-TOKEN = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
-ENDPOINT_HEADERS = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Content-Type": "application/json",
-}
-print(f"Endpoint: https://{HOST}/serving-endpoints/{COSMOS_VIDEO_ENDPOINT}/invocations")
+from huggingface_hub import snapshot_download
+import torch
+from transformers import AutoModel, AutoProcessor
+
+COSMOS_LOCAL_DIR = "/tmp/cosmos_embed1_model"
+
+py_files = [f for f in os.listdir(COSMOS_LOCAL_DIR) if f.endswith(".py")] if os.path.exists(COSMOS_LOCAL_DIR) else []
+if not py_files:
+    print("Cosmos-Embed1-448p をダウンロード中 (初回のみ、約2.4GB)...")
+    snapshot_download(
+        repo_id="nvidia/Cosmos-Embed1-448p",
+        local_dir=COSMOS_LOCAL_DIR,
+        ignore_patterns=["*.msgpack", "flax_model*", "tf_model*", "*.ot"],
+    )
+    print(f"ダウンロード完了: {COSMOS_LOCAL_DIR}")
+else:
+    print(f"既存モデルを再利用: {COSMOS_LOCAL_DIR}")
+
+_COSMOS_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_COSMOS_DTYPE = torch.float16 if _COSMOS_DEVICE == "cuda" else torch.float32
+print(f"デバイス: {_COSMOS_DEVICE}, dtype: {_COSMOS_DTYPE}")
+
+# low_cpu_mem_usage=True causes pos_embed shape mismatch (init_empty_weights uses default
+# image_size=224 → 257 positions, but 448p weights have 1025 positions). Load normally.
+_cosmos_model = AutoModel.from_pretrained(
+    COSMOS_LOCAL_DIR,
+    trust_remote_code=True,
+).to(_COSMOS_DEVICE, dtype=_COSMOS_DTYPE)
+_cosmos_model.eval()
+_cosmos_processor = AutoProcessor.from_pretrained(COSMOS_LOCAL_DIR, trust_remote_code=True)
+print("Cosmos モデルロード完了")
 
 # COMMAND ----------
 
@@ -175,23 +201,25 @@ def save_thumbnail(frames, segment_id, output_dir):
 
 
 def compute_video_embedding(frames):
-    """フレーム列からビデオembeddingを計算 (cosmos-video-encoder serving endpoint)"""
-    frames_b64 = []
-    for frame in frames:
-        img = Image.fromarray(frame)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        frames_b64.append(base64.b64encode(buf.getvalue()).decode())
+    """フレーム列からビデオembeddingを計算 (Cosmos モデル直接推論)"""
+    frames_np = np.array(frames)  # (T, H, W, C)
+    # BTCHW フォーマットに変換
+    batch = np.transpose(np.expand_dims(frames_np, 0), (0, 1, 4, 2, 3))
+    video_inputs = _cosmos_processor(videos=batch).to(_COSMOS_DEVICE, dtype=_COSMOS_DTYPE)
 
-    resp = requests.post(
-        f"https://{HOST}/serving-endpoints/{COSMOS_VIDEO_ENDPOINT}/invocations",
-        headers=ENDPOINT_HEADERS,
-        json={"dataframe_records": [{"frames": frames_b64}]},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    result = resp.json()
-    return result["predictions"]["embedding"][0]
+    with torch.no_grad():
+        video_emb = _cosmos_model.get_video_embeddings(**video_inputs)
+
+    if hasattr(video_emb, 'video_embeds'):
+        emb_tensor = video_emb.video_embeds
+    elif torch.is_tensor(video_emb):
+        emb_tensor = video_emb
+    elif hasattr(video_emb, 'visual_proj'):
+        emb_tensor = video_emb.visual_proj
+    else:
+        emb_tensor = video_emb[0] if hasattr(video_emb, '__getitem__') else video_emb
+
+    return emb_tensor.cpu().float().numpy().flatten().tolist()
 
 # COMMAND ----------
 
@@ -324,3 +352,4 @@ videos_with_data = spark.table(TABLE_NAME).select("video_id").distinct().count()
 print(f"処理済み動画数: {videos_with_data}")
 print(f"embedding次元: {len(emb)}")
 print("NOTEBOOK 01 VERIFIED OK")
+
