@@ -22,6 +22,7 @@
 # MAGIC | Cell 10 | `.cache/huggingface/` メタデータが不要な WSFS ルックアップを誘発 | `shutil.rmtree` で除外してからログ |
 # MAGIC | Cell 14 | 旧バージョンが READY のまま新バージョン反映前に break | `config_update == "NOT_UPDATING"` 条件を追加 |
 # MAGIC | Cell 16 | invocations URL に `/api/2.0/` プレフィックス不要 | `https://{host}/serving-endpoints/{name}/invocations` に修正 |
+# MAGIC | Cell 8 | テキストエンコード時に `padding=True` が `preprocessing_embed1.py` 内部の `padding` と競合し `TypeError: got multiple values` | `self.processor(text=..., return_tensors="pt")` から `padding=True` を削除 |
 
 # COMMAND ----------
 
@@ -141,7 +142,7 @@ class CosmosVideoEncoder(mlflow.pyfunc.PythonModel):
     def _embed_text(self, text):
         import torch
 
-        text_inputs = self.processor(text=[text], return_tensors="pt", padding=True).to(self.device)
+        text_inputs = self.processor(text=[text], return_tensors="pt").to(self.device)
         with torch.no_grad():
             text_emb = self.model.get_text_embeddings(**text_inputs)
 
