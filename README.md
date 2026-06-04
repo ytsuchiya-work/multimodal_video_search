@@ -1028,6 +1028,33 @@ def _embed_text(self, text):
 
 再デプロイは `03b_deploy_cosmos_video_encoder.py` の Cell 8 以降を再実行すれば新バージョンが登録されてエンドポイントが自動更新される。
 
+**CLI から runs/submit で再デプロイする場合:**
+
+```bash
+TOKEN=$(databricks auth token --profile fevm-classic-stable-ytcy \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+curl -s -X POST "https://fevm-classic-stable-ytcy.cloud.databricks.com/api/2.1/jobs/runs/submit" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "run_name": "cosmos-redeploy",
+    "tasks": [{
+      "task_key": "deploy",
+      "notebook_task": {
+        "notebook_path": "/Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/03b_deploy_cosmos_video_encoder"
+      },
+      "new_cluster": {
+        "num_workers": 0,
+        "spark_version": "15.4.x-gpu-ml-scala2.12",
+        "node_type_id": "g4dn.xlarge",
+        "aws_attributes": {"availability": "ON_DEMAND"}
+      }
+    }]
+  }'
+```
+
+> **注意**: `notebook_path` は `/Repos/...` ではなく `/Users/<email>/...` を使う。Git Folder のノートブックは `/Users/<email>/...` 配下に配置されるため、`/Repos/...` パスは存在しない。
+
 ---
 
 ### 問題 15: Databricks SDK の `query_index()` で `Insufficient permissions for UC entity <index_name>`
