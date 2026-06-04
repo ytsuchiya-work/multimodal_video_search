@@ -1,9 +1,9 @@
 bundle:
-  name: video-search-cosmos
+  name: multimodal-video-search
 
 workspace:
   host: https://fevm-classic-stable-ytcy.cloud.databricks.com/
-  profile: fe-vm-classic-stable-ytcy
+  profile: fevm-classic-stable-ytcy
 
 variables:
   catalog:
@@ -11,9 +11,117 @@ variables:
   schema:
     default: multimodal_video_search
 
+resources:
+  apps:
+    multimodal_video_search:
+      name: multimodal-video-search
+      description: "NVIDIA Cosmos-Embed1 + マルチモーダル検索による動画セマンティック検索アプリ"
+      source_code_path: /Workspace/Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/app
+
+  jobs:
+    multimodal_video_search_pipeline:
+      name: multimodal-video-search-pipeline
+      max_concurrent_runs: 1
+      job_clusters:
+        - job_cluster_key: gpu_cluster
+          new_cluster:
+            spark_version: 15.4.x-gpu-ml-scala2.12
+            node_type_id: g4dn.xlarge
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: local[*]
+            custom_tags:
+              ResourceClass: SingleNode
+            aws_attributes:
+              availability: SPOT_WITH_FALLBACK
+              first_on_demand: 1
+              zone_id: auto
+            spark_env_vars:
+              PYSPARK_PYTHON: /databricks/python3/bin/python3
+      tasks:
+        - task_key: 00_download_videos
+          job_cluster_key: gpu_cluster
+          notebook_task:
+            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/00_download_videos
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          timeout_seconds: 600
+
+        - task_key: 03b_deploy_cosmos_encoder
+          job_cluster_key: gpu_cluster
+          notebook_task:
+            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/03b_deploy_cosmos_video_encoder
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          timeout_seconds: 3600
+
+        - task_key: 03c_deploy_text_embedder
+          job_cluster_key: gpu_cluster
+          notebook_task:
+            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/03c_deploy_text_embedder
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          timeout_seconds: 3600
+
+        - task_key: 03d_deploy_clip_encoder
+          job_cluster_key: gpu_cluster
+          notebook_task:
+            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/03d_deploy_clip_encoder
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          timeout_seconds: 3600
+
+        - task_key: 01_cosmos_embedding
+          depends_on:
+            - task_key: 00_download_videos
+            - task_key: 03b_deploy_cosmos_encoder
+          job_cluster_key: gpu_cluster
+          notebook_task:
+            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/01_video_embedding_pipeline
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          timeout_seconds: 14400
+
+        - task_key: 04_multimodal_pipeline
+          depends_on:
+            - task_key: 00_download_videos
+            - task_key: 03c_deploy_text_embedder
+            - task_key: 03d_deploy_clip_encoder
+          job_cluster_key: gpu_cluster
+          notebook_task:
+            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/04_multimodal_pipeline
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          timeout_seconds: 14400
+
+        - task_key: 02_setup_vector_search
+          depends_on:
+            - task_key: 01_cosmos_embedding
+            - task_key: 04_multimodal_pipeline
+          job_cluster_key: gpu_cluster
+          notebook_task:
+            notebook_path: /Users/yusuke.tsuchiya@databricks.com/multimodal_video_search/notebooks/02_setup_vector_search
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          timeout_seconds: 3600
+
 targets:
   dev:
     mode: development
     default: true
+    workspace:
+      root_path: /Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
+  prod:
+    mode: production
     workspace:
       root_path: /Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
