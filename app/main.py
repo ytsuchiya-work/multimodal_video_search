@@ -86,22 +86,26 @@ async def list_endpoints():
                 timeout=10,
             )
             if resp.status_code == 200:
-                s = resp.json().get("state", {})
+                d = resp.json()
+                s = d.get("state", {})
                 ready = s.get("ready", "UNKNOWN")
                 config_update = s.get("config_update", "UNKNOWN")
-                entities = resp.json().get("config", {}).get("served_entities", [])
+                entities = d.get("config", {}).get("served_entities", [])
                 version = entities[0].get("entity_version", "?") if entities else "?"
+                deploy_msg = entities[0].get("state", {}).get("deployment_state_message", "") if entities else ""
+                warm = ready == "READY" and "Scaling" not in deploy_msg
             else:
-                ready, config_update, version = "UNKNOWN", "UNKNOWN", "?"
+                ready, config_update, version, warm = "UNKNOWN", "UNKNOWN", "?", False
         except Exception as e:
             logger.warning(f"Endpoint status check failed for {name}: {e}")
-            ready, config_update, version = "UNKNOWN", "UNKNOWN", "?"
+            ready, config_update, version, warm = "UNKNOWN", "UNKNOWN", "?", False
         results.append({
             "name": name,
             **info,
             "ready": ready,
             "config_update": config_update,
             "version": version,
+            "warm": warm,
         })
     return {"endpoints": results}
 

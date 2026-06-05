@@ -90,7 +90,12 @@ const styles = {
     background: "#eff6ff", color: "#2563eb", border: "1px solid #bfdbfe",
     borderRadius: "6px", cursor: "pointer", whiteSpace: "nowrap",
   },
-  warmupBtnLoading: { background: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0", cursor: "not-allowed" },
+  warmupBtnLoading: {
+    background: "#fefce8", color: "#854d0e", border: "1px solid #fde68a", cursor: "not-allowed",
+  },
+  warmupBtnRunning: {
+    background: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0", cursor: "default",
+  },
 };
 
 // ── Endpoints Panel ───────────────────────────────────────────────────────────
@@ -99,7 +104,6 @@ function EndpointsPanel() {
   const [endpoints, setEndpoints] = useState([]);
   const [loading, setLoading] = useState(false);
   const [warmingUp, setWarmingUp] = useState({});
-  const [warmupDone, setWarmupDone] = useState({});
 
   const fetchEndpoints = async () => {
     setLoading(true);
@@ -121,21 +125,16 @@ function EndpointsPanel() {
 
   const handleWarmup = async (name) => {
     setWarmingUp((w) => ({ ...w, [name]: true }));
-    setWarmupDone((d) => ({ ...d, [name]: false }));
     try {
       const { task_id } = await fetch(`/api/endpoints/${name}/warmup`, { method: "POST" })
         .then((r) => r.json());
-      // Poll warmup task until the actual inference request succeeds
       for (let i = 0; i < 45; i++) {
         await new Promise((r) => setTimeout(r, 10000));
         const data = await fetch(`/api/endpoints/warmup/${task_id}`).then((r) => r.json());
-        if (data.status === "done") {
-          setWarmupDone((d) => ({ ...d, [name]: true }));
-          // Refresh endpoint list to show updated status
-          fetch("/api/endpoints").then((r) => r.json()).then((d) => setEndpoints(d.endpoints || []));
+        if (data.status === "done" || data.status === "error") {
+          fetchEndpoints();
           break;
         }
-        if (data.status === "error") break;
       }
     } catch {
       // ignore
@@ -198,16 +197,14 @@ function EndpointsPanel() {
                 style={
                   warmingUp[ep.name]
                     ? { ...styles.warmupBtn, ...styles.warmupBtnLoading }
+                    : ep.warm
+                    ? { ...styles.warmupBtn, ...styles.warmupBtnRunning }
                     : styles.warmupBtn
                 }
-                onClick={() => !warmingUp[ep.name] && handleWarmup(ep.name)}
-                disabled={warmingUp[ep.name]}
+                onClick={() => !warmingUp[ep.name] && !ep.warm && handleWarmup(ep.name)}
+                disabled={warmingUp[ep.name] || ep.warm}
               >
-                {warmingUp[ep.name]
-                  ? "⏳ 起動中..."
-                  : warmupDone[ep.name]
-                  ? "✓ 完了"
-                  : "▶ ウォームアップ"}
+                {warmingUp[ep.name] ? "⏳ 起動中..." : ep.warm ? "● 起動中" : "▶ ウォームアップ"}
               </button>
             </div>
           </div>
