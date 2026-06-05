@@ -2,85 +2,63 @@
 # MAGIC %md
 # MAGIC # GCS 公開サンプル動画ダウンロード
 # MAGIC
-# MAGIC Google Cloud Storage の公開バケットからサンプル動画を一覧取得し、
-# MAGIC UC Volume (`/Volumes/.../videos`) に保存する。
+# MAGIC Google Cloud Storage の公開バケット (`gtv-videos-bucket/sample/`) から
+# MAGIC サンプル動画をダウンロードし、UC Volume に保存する。
 # MAGIC
-# MAGIC **対象バケット**
-# MAGIC
-# MAGIC | バケット | プレフィックス | 内容 |
-# MAGIC |---------|--------------|------|
-# MAGIC | `gtv-videos-bucket` | `sample/` | Google 公式デモ用 MP4（Big Buck Bunny 等） |
-# MAGIC
-# MAGIC 認証不要（公開バケット）。GCS JSON API でオブジェクト一覧を取得し、
-# MAGIC 動画ファイルのみフィルタしてダウンロードする。
+# MAGIC **注意**: GCS の JSON listing API はバケット単位の読み取り権限が必要なため 401 になる。
+# MAGIC オブジェクト単位の公開 URL は認証不要でダウンロードできるため、既知 URL を直接使用する。
 
 # COMMAND ----------
 
-CATALOG = spark.conf.get("bundle.variable.catalog", "classic_stable_ytcy_catalog")
-SCHEMA  = "multimodal_video_search"
+CATALOG    = spark.conf.get("bundle.variable.catalog", "classic_stable_ytcy_catalog")
+SCHEMA     = "multimodal_video_search"
 VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/videos"
 
-# ダウンロード対象バケット定義 (バケット名, プレフィックス) のリスト
-# 公開バケットを追加する場合はここに追記する
-GCS_SOURCES = [
-    ("gtv-videos-bucket", "sample/"),
+# gtv-videos-bucket/sample/ の公開サンプル動画 URL 一覧
+# https://gcs.googlevideo.com などと同様、認証不要で直接 GET できる
+GCS_BASE = "https://storage.googleapis.com/gtv-videos-bucket/sample"
+SAMPLE_VIDEOS = [
+    "BigBuckBunny.mp4",
+    "ElephantsDream.mp4",
+    "ForBiggerBlazes.mp4",
+    "ForBiggerEscapes.mp4",
+    "ForBiggerFun.mp4",
+    "ForBiggerJoyrides.mp4",
+    "ForBiggerMeltdowns.mp4",
+    "Sintel.mp4",
+    "SubaruOutbackOnStreetAndDirt.mp4",
+    "TearsOfSteel.mp4",
+    "VolkswagenGTIReview.mp4",
+    "WeAreGoingOnBullrun.mp4",
+    "WhatCareers.mp4",
 ]
 
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
+all_videos = [{"filename": f, "url": f"{GCS_BASE}/{f}"} for f in SAMPLE_VIDEOS]
+
+print(f"ダウンロード対象: {len(all_videos)} 件")
+for v in all_videos:
+    print(f"  {v['url']}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## GCS バケットからファイル一覧を取得
+# MAGIC ## 疎通確認 — HEAD リクエストでファイルサイズを取得
 
 # COMMAND ----------
 
 import requests
 
-def list_gcs_videos(bucket: str, prefix: str = "") -> list[dict]:
-    """GCS JSON API で公開バケット内の動画ファイルを全件列挙する。"""
-    url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
-    videos = []
-    page_token = None
+videos = []
+for v in all_videos:
+    resp = requests.head(v["url"], timeout=15)
+    if resp.status_code == 200:
+        size_mb = round(int(resp.headers.get("content-length", 0)) / 1024 / 1024, 1)
+        videos.append({**v, "size_mb": size_mb})
+        print(f"  OK  {v['filename']}  ({size_mb} MB)")
+    else:
+        print(f"  NG  {v['filename']}  HTTP {resp.status_code}")
 
-    while True:
-        params = {"prefix": prefix}
-        if page_token:
-            params["pageToken"] = page_token
-
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-        for item in data.get("items", []):
-            name: str = item["name"]
-            ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
-            if ext in VIDEO_EXTENSIONS:
-                size_bytes = int(item.get("size", 0))
-                videos.append({
-                    "bucket":   bucket,
-                    "name":     name,
-                    "filename": name.split("/")[-1],
-                    "size_mb":  round(size_bytes / 1024 / 1024, 1),
-                    "url":      f"https://storage.googleapis.com/{bucket}/{name}",
-                })
-
-        page_token = data.get("nextPageToken")
-        if not page_token:
-            break
-
-    return videos
-
-
-all_videos = []
-for bucket, prefix in GCS_SOURCES:
-    print(f"\n=== {bucket}/{prefix} ===")
-    videos = list_gcs_videos(bucket, prefix)
-    for v in videos:
-        print(f"  {v['filename']}  ({v['size_mb']} MB)  {v['url']}")
-    all_videos.extend(videos)
-
-print(f"\n合計: {len(all_videos)} 件")
+print(f"\nアクセス可能: {len(videos)} / {len(all_videos)} 件")
 
 # COMMAND ----------
 
@@ -94,7 +72,7 @@ import os
 os.makedirs(VOLUME_PATH, exist_ok=True)
 
 results = []
-for v in all_videos:
+for v in videos:
     dest = os.path.join(VOLUME_PATH, v["filename"])
 
     if os.path.exists(dest):
@@ -103,7 +81,7 @@ for v in all_videos:
         results.append({**v, "status": "skipped", "dest": dest})
         continue
 
-    print(f"[DL]    {v['filename']}  ({v['size_mb']} MB)  ...", end=" ", flush=True)
+    print(f"[DL]    {v['filename']}  ({v['size_mb']} MB) ...", end=" ", flush=True)
     try:
         resp = requests.get(v["url"], stream=True, timeout=300)
         resp.raise_for_status()
@@ -153,8 +131,8 @@ assert len(errors) == 0, f"ダウンロードエラー: {[e['filename'] for e in
 
 # COMMAND ----------
 
-saved = sorted(os.listdir(VOLUME_PATH))
-print(f"Volume 内のファイル ({len(saved)} 件): {VOLUME_PATH}")
+saved = sorted(f for f in os.listdir(VOLUME_PATH) if f.endswith(".mp4"))
+print(f"Volume 内の MP4 ファイル ({len(saved)} 件): {VOLUME_PATH}")
 for f in saved:
     size_mb = round(os.path.getsize(os.path.join(VOLUME_PATH, f)) / 1024 / 1024, 1)
     print(f"  {f}  ({size_mb} MB)")
