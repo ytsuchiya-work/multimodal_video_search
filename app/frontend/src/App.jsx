@@ -126,8 +126,8 @@ function EndpointsPanel() {
       const { task_id } = await fetch(`/api/endpoints/${name}/warmup`, { method: "POST" })
         .then((r) => r.json());
       // Poll warmup task until the actual inference request succeeds
-      for (let i = 0; i < 150; i++) {
-        await new Promise((r) => setTimeout(r, 3000));
+      for (let i = 0; i < 45; i++) {
+        await new Promise((r) => setTimeout(r, 10000));
         const data = await fetch(`/api/endpoints/warmup/${task_id}`).then((r) => r.json());
         if (data.status === "done") {
           setWarmupDone((d) => ({ ...d, [name]: true }));
