@@ -35,11 +35,12 @@ const styles = {
     fontSize: "13px",
   },
   skeleton: {
-    width: "100%",
-    height: "100%",
+    position: "absolute",
+    inset: 0,
     background: "linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%)",
     backgroundSize: "200% 100%",
     animation: "shimmer 1.4s infinite",
+    transition: "opacity 0.2s",
   },
   timeBadge: {
     position: "absolute",
@@ -165,15 +166,14 @@ export default function VideoCard({ result, searchMode, onPlay }) {
       <div style={styles.thumbnailContainer}>
         {!imgError ? (
           <>
-            {!imgLoaded && <div style={styles.skeleton} />}
             <img
-              style={{ ...styles.thumbnail, display: imgLoaded ? "block" : "none" }}
+              style={styles.thumbnail}
               src={result.thumbnail_url}
               alt={result.title}
-              loading="lazy"
               onLoad={() => setImgLoaded(true)}
               onError={() => setImgError(true)}
             />
+            {!imgLoaded && <div style={styles.skeleton} />}
           </>
         ) : (
           <div style={styles.thumbnailPlaceholder}>No Thumbnail</div>
