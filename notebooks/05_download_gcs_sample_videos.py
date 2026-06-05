@@ -25,25 +25,19 @@ SAMPLE_VIDEOS = [
     {
         "filename": "BigBuckBunny_320x180.mp4",
         "url": "https://download.blender.org/peach/bigbuckbunny_movies/BigBuckBunny_320x180.mp4",
-        "title": "Big Buck Bunny (320x180)",
+        "title": "Big Buck Bunny (320x180, ~64MB)",
         "license": "CC BY 3.0",
     },
     {
-        "filename": "ElephantsDream_640x360.mp4",
-        "url": "https://download.blender.org/elephantsdream/movies/ed_640_512kb.mp4",
-        "title": "Elephant's Dream (640x360)",
-        "license": "CC BY 2.5",
-    },
-    {
-        "filename": "Sintel_480p.mp4",
-        "url": "https://download.blender.org/durian/movies/sintel-1024-stereo.mp4",
-        "title": "Sintel (1024x436)",
+        "filename": "BigBuckBunny_480p.mov",
+        "url": "https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_480p_h264.mov",
+        "title": "Big Buck Bunny (480p, ~237MB)",
         "license": "CC BY 3.0",
     },
     {
-        "filename": "TearsOfSteel_480p.mp4",
-        "url": "https://download.blender.org/mango/movies/Tears_of_Steel_1080p.mov",
-        "title": "Tears of Steel (1080p)",
+        "filename": "TearsOfSteel_720p.mov",
+        "url": "https://download.blender.org/demo/movies/ToS/tears_of_steel_720p.mov",
+        "title": "Tears of Steel (720p, ~354MB)",
         "license": "CC BY 3.0",
     },
 ]
@@ -128,7 +122,7 @@ assert len(downloaded) + len(skipped) > 0, "1件もダウンロードできま�
 
 # COMMAND ----------
 
-saved = sorted(f for f in os.listdir(VOLUME_PATH) if f.endswith((".mp4", ".mov")))
+saved = sorted(f for f in os.listdir(VOLUME_PATH) if f.lower().endswith((".mp4", ".mov")))
 print(f"Volume 内の動画ファイル ({len(saved)} 件): {VOLUME_PATH}")
 for f in saved:
     size_mb = round(os.path.getsize(os.path.join(VOLUME_PATH, f)) / 1024 / 1024, 1)
