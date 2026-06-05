@@ -119,7 +119,7 @@ function EndpointsPanel() {
 
   useEffect(() => {
     fetchEndpoints();
-    const id = setInterval(fetchEndpoints, 20000);
+    const id = setInterval(fetchEndpoints, 5000);
     return () => clearInterval(id);
   }, []);
 
@@ -128,8 +128,8 @@ function EndpointsPanel() {
     try {
       const { task_id } = await fetch(`/api/endpoints/${name}/warmup`, { method: "POST" })
         .then((r) => r.json());
-      for (let i = 0; i < 45; i++) {
-        await new Promise((r) => setTimeout(r, 10000));
+      for (let i = 0; i < 90; i++) {
+        await new Promise((r) => setTimeout(r, 5000));
         const data = await fetch(`/api/endpoints/warmup/${task_id}`).then((r) => r.json());
         if (data.status === "done" || data.status === "error") {
           fetchEndpoints();
@@ -237,7 +237,7 @@ function ClusterStatusBar({ onToggleEndpoints, showEndpoints }) {
 
   const startPolling = () => {
     if (pollRef.current) return;
-    pollRef.current = setInterval(fetchStatus, 10000);
+    pollRef.current = setInterval(fetchStatus, 5000);
   };
 
   const stopPolling = () => {
@@ -283,8 +283,8 @@ function ClusterStatusBar({ onToggleEndpoints, showEndpoints }) {
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 
-const POLL_INTERVAL_MS = 2000;
-const MAX_POLL_ATTEMPTS = 150; // 5 minutes
+const POLL_INTERVAL_MS = 5000;
+const MAX_POLL_ATTEMPTS = 60; // 5 minutes
 
 export default function App() {
   const [results, setResults] = useState([]);
