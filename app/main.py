@@ -378,7 +378,11 @@ async def get_thumbnail(segment_id: str):
             headers=file_headers,
         )
         if resp.status_code == 200:
-            return Response(content=resp.content, media_type="image/jpeg")
+            return Response(
+                content=resp.content,
+                media_type="image/jpeg",
+                headers={"Cache-Control": "public, max-age=3600"},
+            )
         raise HTTPException(status_code=404, detail="Thumbnail not found")
     except HTTPException:
         raise

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
 const styles = {
   card: {
@@ -33,6 +33,13 @@ const styles = {
     justifyContent: "center",
     color: "#999",
     fontSize: "13px",
+  },
+  skeleton: {
+    width: "100%",
+    height: "100%",
+    background: "linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%)",
+    backgroundSize: "200% 100%",
+    animation: "shimmer 1.4s infinite",
   },
   timeBadge: {
     position: "absolute",
@@ -132,9 +139,17 @@ function formatTime(seconds) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+const shimmerCSS = `
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+`;
+
 export default function VideoCard({ result, searchMode, onPlay }) {
   const [hovered, setHovered] = useState(false);
   const [imgError, setImgError] = useState(false);
+  const [imgLoaded, setImgLoaded] = useState(false);
 
   const scorePercent = Math.round(result.score * 100);
   const isMultimodal = searchMode === "multimodal";
@@ -146,14 +161,20 @@ export default function VideoCard({ result, searchMode, onPlay }) {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
+      <style>{shimmerCSS}</style>
       <div style={styles.thumbnailContainer}>
         {!imgError ? (
-          <img
-            style={styles.thumbnail}
-            src={result.thumbnail_url}
-            alt={result.title}
-            onError={() => setImgError(true)}
-          />
+          <>
+            {!imgLoaded && <div style={styles.skeleton} />}
+            <img
+              style={{ ...styles.thumbnail, display: imgLoaded ? "block" : "none" }}
+              src={result.thumbnail_url}
+              alt={result.title}
+              loading="lazy"
+              onLoad={() => setImgLoaded(true)}
+              onError={() => setImgError(true)}
+            />
+          </>
         ) : (
           <div style={styles.thumbnailPlaceholder}>No Thumbnail</div>
         )}
