@@ -79,8 +79,9 @@ for v in all_videos:
     except Exception as e:
         if os.path.exists(dest + ".tmp"):
             os.unlink(dest + ".tmp")
-        print(f"ERROR: {e}")
+        print(f"ERROR: {type(e).__name__}: {e}")
         results.append({"filename": v["filename"], "size_mb": 0, "status": "error", "dest": "", "error": str(e)})
+        raise  # 最初のエラーで即停止して error_trace に詳細を出す
 
 # COMMAND ----------
 
