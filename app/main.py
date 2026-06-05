@@ -106,7 +106,10 @@ async def list_endpoints():
     return {"endpoints": results}
 
 
-def _do_warmup(endpoint_name: str):
+warmup_tasks: dict = {}
+
+
+def _do_warmup(task_id: str, endpoint_name: str):
     if endpoint_name == TEXT_EMBED_ENDPOINT_NAME:
         payload = {"dataframe_records": [{"text": "warmup ping"}]}
     else:
@@ -118,17 +121,30 @@ def _do_warmup(endpoint_name: str):
             json=payload,
             timeout=_ENDPOINT_TIMEOUT,
         )
+        resp.raise_for_status()
         logger.info(f"Warmup {endpoint_name}: {resp.status_code}")
+        warmup_tasks[task_id] = {"status": "done", "endpoint": endpoint_name}
     except Exception as e:
         logger.error(f"Warmup {endpoint_name} error: {e}")
+        warmup_tasks[task_id] = {"status": "error", "endpoint": endpoint_name, "error": str(e)}
 
 
 @app.post("/api/endpoints/{endpoint_name}/warmup")
 async def warmup_endpoint(endpoint_name: str, background_tasks: BackgroundTasks):
     if endpoint_name not in ENDPOINT_INFO:
         raise HTTPException(status_code=404, detail=f"Unknown endpoint: {endpoint_name}")
-    background_tasks.add_task(_do_warmup, endpoint_name)
-    return {"status": "warmup_started", "endpoint": endpoint_name}
+    task_id = str(uuid.uuid4())
+    warmup_tasks[task_id] = {"status": "pending", "endpoint": endpoint_name}
+    background_tasks.add_task(_do_warmup, task_id, endpoint_name)
+    return {"status": "pending", "task_id": task_id, "endpoint": endpoint_name}
+
+
+@app.get("/api/endpoints/warmup/{task_id}")
+async def get_warmup_status(task_id: str):
+    result = warmup_tasks.get(task_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Warmup task not found")
+    return result
 
 
 # ── Health / cluster status ───────────────────────────────────────────────────

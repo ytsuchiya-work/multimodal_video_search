@@ -123,17 +123,19 @@ function EndpointsPanel() {
     setWarmingUp((w) => ({ ...w, [name]: true }));
     setWarmupDone((d) => ({ ...d, [name]: false }));
     try {
-      await fetch(`/api/endpoints/${name}/warmup`, { method: "POST" });
-      // Poll until READY or error
-      for (let i = 0; i < 90; i++) {
+      const { task_id } = await fetch(`/api/endpoints/${name}/warmup`, { method: "POST" })
+        .then((r) => r.json());
+      // Poll warmup task until the actual inference request succeeds
+      for (let i = 0; i < 150; i++) {
         await new Promise((r) => setTimeout(r, 3000));
-        const data = await fetch("/api/endpoints").then((r) => r.json());
-        const ep = (data.endpoints || []).find((e) => e.name === name);
-        if (ep && ep.ready === "READY") {
-          setEndpoints(data.endpoints);
+        const data = await fetch(`/api/endpoints/warmup/${task_id}`).then((r) => r.json());
+        if (data.status === "done") {
           setWarmupDone((d) => ({ ...d, [name]: true }));
+          // Refresh endpoint list to show updated status
+          fetch("/api/endpoints").then((r) => r.json()).then((d) => setEndpoints(d.endpoints || []));
           break;
         }
+        if (data.status === "error") break;
       }
     } catch {
       // ignore
