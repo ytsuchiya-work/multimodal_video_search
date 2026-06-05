@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import SearchBar from "./components/SearchBar.jsx";
 import ResultGrid from "./components/ResultGrid.jsx";
 import VideoPlayer from "./components/VideoPlayer.jsx";
@@ -21,16 +21,11 @@ const styles = {
     background: "#fef2f2", border: "1px solid #fecaca",
     borderRadius: "8px", padding: "12px 16px", color: "#dc2626", marginTop: "16px",
   },
-  clusterBar: {
-    display: "flex", alignItems: "center", justifyContent: "center",
-    gap: "12px", padding: "10px 16px", borderRadius: "8px",
-    marginBottom: "16px", fontSize: "13px",
-  },
-  clusterRunning: { background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534" },
-  clusterStopped: { background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" },
-  clusterPending: { background: "#fffbeb", border: "1px solid #fde68a", color: "#92400e" },
-  clusterUnknown: { background: "#f9fafb", border: "1px solid #e5e7eb", color: "#6b7280" },
   dot: { width: "8px", height: "8px", borderRadius: "50%", display: "inline-block" },
+  epToggleLink: {
+    fontSize: "13px", color: "#6b7280", background: "none", border: "none",
+    cursor: "pointer", textDecoration: "underline", padding: 0,
+  },
   tabs: {
     display: "flex", justifyContent: "center", gap: "4px", marginBottom: "24px",
     background: "#f3f4f6", borderRadius: "10px", padding: "4px",
@@ -219,68 +214,6 @@ function EndpointsPanel() {
   );
 }
 
-// ── Cluster status bar ────────────────────────────────────────────────────────
-
-function ClusterStatusBar({ onToggleEndpoints, showEndpoints }) {
-  const [clusterState, setClusterState] = useState(null);
-  const pollRef = useRef(null);
-
-  const fetchStatus = async () => {
-    try {
-      const data = await fetch("/api/cluster/status").then((r) => r.json());
-      setClusterState(data.state);
-      if (data.state === "RUNNING") stopPolling();
-    } catch {
-      setClusterState("UNKNOWN");
-    }
-  };
-
-  const startPolling = () => {
-    if (pollRef.current) return;
-    pollRef.current = setInterval(fetchStatus, 5000);
-  };
-
-  const stopPolling = () => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-  };
-
-  useEffect(() => {
-    fetchStatus();
-    return () => stopPolling();
-  }, []);
-
-  useEffect(() => {
-    if (clusterState && clusterState !== "RUNNING") startPolling();
-  }, [clusterState]);
-
-  if (!clusterState) return null;
-
-  const isRunning = clusterState === "RUNNING";
-  const isPending = clusterState === "STARTING";
-  let barStyle = styles.clusterUnknown;
-  if (isRunning) barStyle = styles.clusterRunning;
-  else if (isPending) barStyle = styles.clusterPending;
-
-  return (
-    <div style={{ ...styles.clusterBar, ...barStyle }}>
-      <span style={{ ...styles.dot, background: isRunning ? "#22c55e" : isPending ? "#f59e0b" : "#9ca3af" }} />
-      {isRunning && <span>GPU Ready — 検索可能です</span>}
-      {isPending && <span>エンドポイント確認中...</span>}
-      {!isRunning && !isPending && <span>エンドポイント: {clusterState}</span>}
-      <button
-        onClick={onToggleEndpoints}
-        style={{
-          marginLeft: "8px", padding: "3px 10px", fontSize: "11px",
-          background: "rgba(0,0,0,0.06)", border: "none", borderRadius: "12px",
-          cursor: "pointer", color: "inherit",
-        }}
-      >
-        {showEndpoints ? "▲ 閉じる" : "⚡ エンドポイント管理"}
-      </button>
-    </div>
-  );
-}
-
 // ── Main App ──────────────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 5000;
@@ -390,13 +323,14 @@ export default function App() {
               ? "Powered by NVIDIA Cosmos-Embed1-448p"
               : "Powered by Whisper + CLIP + multilingual-e5-large"}
           </span>
+          <button
+            style={styles.epToggleLink}
+            onClick={() => setShowEndpoints((s) => !s)}
+          >
+            {showEndpoints ? "▲ エンドポイントを閉じる" : "⚡ エンドポイント管理"}
+          </button>
         </div>
       </header>
-
-      <ClusterStatusBar
-        onToggleEndpoints={() => setShowEndpoints((s) => !s)}
-        showEndpoints={showEndpoints}
-      />
 
       {showEndpoints && <EndpointsPanel />}
 
