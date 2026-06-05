@@ -1189,3 +1189,54 @@ for (let i = 0; i < 45; i++) {
 ```
 
 > **注意**: `ready === "READY"` はエンドポイント設定の有効性を示すだけで、GPU の起動状態とは無関係。GPU がコールドの間も `"READY"` を返し続ける。
+
+---
+
+### 問題 18: サムネイル画像が常にスケルトンのまま表示されない
+
+**現象**  
+検索結果カードのサムネイル領域がシマーアニメーション (スケルトン) のまま固まり、画像が表示されない。`/api/thumbnail/{segment_id}` は 200 を返しており、画像データは正常に取得できている。
+
+**原因**  
+`display: none` と `loading="lazy"` の組み合わせが原因。
+
+```jsx
+// NG: display:none の img に loading="lazy" を付けると、ブラウザが
+//     「ビューポート外の非表示要素」と判断してロードを完全にスキップする
+<img
+  style={{ display: imgLoaded ? "block" : "none" }}
+  loading="lazy"
+  onLoad={() => setImgLoaded(true)}   // ← ロードされないため永久に発火しない
+/>
+```
+
+`loading="lazy"` はビューポート外の画像のロードを遅延させる最適化だが、`display: none` の要素はブラウザのレイアウト計算から除外されるため「ビューポート内かどうか」が判定できず、ロード自体がスキップされる。その結果 `onLoad` が発火しないまま `imgLoaded` は `false` のままになり、スケルトンが消えない。
+
+**解決策**  
+スケルトンを画像の上に重ねる絶対位置オーバーレイ方式に変更し、`loading="lazy"` を削除。画像は常にレンダリング (ロード開始) し、ロード完了後にスケルトンを非表示にする:
+
+```jsx
+// OK: img は常にレンダリング → ロード開始 → onLoad が確実に発火
+<img
+  style={styles.thumbnail}
+  src={result.thumbnail_url}
+  onLoad={() => setImgLoaded(true)}
+  onError={() => setImgError(true)}
+/>
+{/* スケルトンは絶対位置オーバーレイ。ロード完了後に消える */}
+{!imgLoaded && <div style={styles.skeleton} />}
+```
+
+```javascript
+// skeleton スタイル: position:absolute で img の上に重ねる
+skeleton: {
+  position: "absolute",
+  inset: 0,
+  background: "linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%)",
+  backgroundSize: "200% 100%",
+  animation: "shimmer 1.4s infinite",
+  transition: "opacity 0.2s",
+}
+```
+
+> **原則**: `display: none` の img に `loading="lazy"` を付けてはいけない。遅延ロードが必要な場合は `opacity: 0` や `visibility: hidden` など、レイアウトツリーに残る非表示方法を使う。
