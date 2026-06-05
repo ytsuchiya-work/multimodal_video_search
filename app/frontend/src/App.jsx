@@ -204,7 +204,7 @@ function EndpointsPanel() {
                 onClick={() => !warmingUp[ep.name] && !ep.warm && handleWarmup(ep.name)}
                 disabled={warmingUp[ep.name] || ep.warm}
               >
-                {warmingUp[ep.name] ? "⏳ 起動中..." : ep.warm ? "● 起動中" : "▶ ウォームアップ"}
+                {warmingUp[ep.name] ? "⏳ 起動中..." : ep.warm ? "● 起動済み" : "▶ ウォームアップ"}
               </button>
             </div>
           </div>
