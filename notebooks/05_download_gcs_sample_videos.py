@@ -42,46 +42,26 @@ for v in all_videos:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 疎通確認 — HEAD リクエストでファイルサイズを取得
-
-# COMMAND ----------
-
-import requests
-
-videos = []
-for v in all_videos:
-    resp = requests.head(v["url"], timeout=15)
-    if resp.status_code == 200:
-        size_mb = round(int(resp.headers.get("content-length", 0)) / 1024 / 1024, 1)
-        videos.append({**v, "size_mb": size_mb})
-        print(f"  OK  {v['filename']}  ({size_mb} MB)")
-    else:
-        print(f"  NG  {v['filename']}  HTTP {resp.status_code}")
-
-print(f"\nアクセス可能: {len(videos)} / {len(all_videos)} 件")
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ## UC Volume にダウンロード
 
 # COMMAND ----------
 
 import os
+import requests
 
 os.makedirs(VOLUME_PATH, exist_ok=True)
 
 results = []
-for v in videos:
+for v in all_videos:
     dest = os.path.join(VOLUME_PATH, v["filename"])
 
     if os.path.exists(dest):
-        actual_mb = round(os.path.getsize(dest) / 1024 / 1024, 1)
-        print(f"[SKIP]  {v['filename']}  (既存 {actual_mb} MB)")
-        results.append({**v, "status": "skipped", "dest": dest})
+        size_mb = round(os.path.getsize(dest) / 1024 / 1024, 1)
+        print(f"[SKIP]  {v['filename']}  (既存 {size_mb} MB)")
+        results.append({"filename": v["filename"], "size_mb": size_mb, "status": "skipped", "dest": dest})
         continue
 
-    print(f"[DL]    {v['filename']}  ({v['size_mb']} MB) ...", end=" ", flush=True)
+    print(f"[DL]    {v['filename']} ...", end=" ", flush=True)
     try:
         resp = requests.get(v["url"], stream=True, timeout=300)
         resp.raise_for_status()
@@ -92,15 +72,15 @@ for v in videos:
                 f.write(chunk)
         os.rename(tmp, dest)
 
-        actual_mb = round(os.path.getsize(dest) / 1024 / 1024, 1)
-        print(f"OK ({actual_mb} MB)")
-        results.append({**v, "status": "downloaded", "dest": dest})
+        size_mb = round(os.path.getsize(dest) / 1024 / 1024, 1)
+        print(f"OK ({size_mb} MB)")
+        results.append({"filename": v["filename"], "size_mb": size_mb, "status": "downloaded", "dest": dest})
 
     except Exception as e:
         if os.path.exists(dest + ".tmp"):
             os.unlink(dest + ".tmp")
         print(f"ERROR: {e}")
-        results.append({**v, "status": "error", "error": str(e)})
+        results.append({"filename": v["filename"], "size_mb": 0, "status": "error", "dest": "", "error": str(e)})
 
 # COMMAND ----------
 
