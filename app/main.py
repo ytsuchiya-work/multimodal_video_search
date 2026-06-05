@@ -3,6 +3,7 @@ import json
 import logging
 import subprocess
 import tempfile
+import time
 import uuid
 import requests as http_requests
 from typing import Optional
@@ -36,6 +37,16 @@ _ENDPOINT_TIMEOUT = 300  # GPU cold-start can take 3-5 min after scale-to-zero
 
 # In-memory store for async search tasks
 search_tasks: dict = {}
+
+# Warm state tracking: confirmed warm only after successful inference
+_endpoint_warm_until: dict = {}
+_SCALE_TO_ZERO_SECONDS = 30 * 60  # Databricks default scale-to-zero timeout
+
+def mark_endpoint_warm(endpoint_name: str):
+    _endpoint_warm_until[endpoint_name] = time.time() + _SCALE_TO_ZERO_SECONDS
+
+def is_endpoint_warm(endpoint_name: str) -> bool:
+    return time.time() < _endpoint_warm_until.get(endpoint_name, 0)
 
 ENDPOINT_INFO = {
     COSMOS_ENDPOINT_NAME: {
@@ -92,8 +103,9 @@ async def list_endpoints():
                 config_update = s.get("config_update", "UNKNOWN")
                 entities = d.get("config", {}).get("served_entities", [])
                 version = entities[0].get("entity_version", "?") if entities else "?"
-                deploy_msg = entities[0].get("state", {}).get("deployment_state_message", "") if entities else ""
-                warm = ready == "READY" and "Scaling" not in deploy_msg
+                # warm = confirmed only by successful inference + TTL, not API state alone.
+                # The deployment_state_message is empty both when warm AND when cold (scale-to-zero idle).
+                warm = ready == "READY" and is_endpoint_warm(name)
             else:
                 ready, config_update, version, warm = "UNKNOWN", "UNKNOWN", "?", False
         except Exception as e:
@@ -127,6 +139,7 @@ def _do_warmup(task_id: str, endpoint_name: str):
         )
         resp.raise_for_status()
         logger.info(f"Warmup {endpoint_name}: {resp.status_code}")
+        mark_endpoint_warm(endpoint_name)
         warmup_tasks[task_id] = {"status": "done", "endpoint": endpoint_name}
     except Exception as e:
         logger.error(f"Warmup {endpoint_name} error: {e}")
@@ -230,6 +243,7 @@ def _run_cosmos_search(task_id: str, query: str, num_results: int):
                 "score": score,
                 "thumbnail_url": f"/api/thumbnail/{row[0]}",
             })
+        mark_endpoint_warm(COSMOS_ENDPOINT_NAME)
         search_tasks[task_id] = {"status": "done", "query": query, "results": results}
     except Exception as e:
         logger.error(f"Cosmos search {task_id} failed: {e}")
@@ -307,6 +321,8 @@ def _run_multimodal_search(task_id: str, query: str, num_results: int):
                 "score": score,
                 "thumbnail_url": f"/api/thumbnail/{sid}",
             })
+        mark_endpoint_warm(TEXT_EMBED_ENDPOINT_NAME)
+        mark_endpoint_warm(CLIP_ENDPOINT_NAME)
         search_tasks[task_id] = {"status": "done", "query": query, "results": results}
     except Exception as e:
         logger.error(f"Multimodal search {task_id} failed: {e}")
