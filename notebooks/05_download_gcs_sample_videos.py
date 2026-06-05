@@ -15,8 +15,8 @@ SCHEMA     = "multimodal_video_search"
 VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/videos"
 
 # gtv-videos-bucket/sample/ の公開サンプル動画 URL 一覧
-# https://gcs.googlevideo.com などと同様、認証不要で直接 GET できる
-GCS_BASE = "https://storage.googleapis.com/gtv-videos-bucket/sample"
+# storage.googleapis.com は 403 になるため、CDN 経由の commondatastorage.googleapis.com を使用
+GCS_BASE = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample"
 SAMPLE_VIDEOS = [
     "BigBuckBunny.mp4",
     "ElephantsDream.mp4",
